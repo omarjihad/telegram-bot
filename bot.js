@@ -185,7 +185,8 @@ async function startMinecraftBot(serverId, telegramBot, chatId, messageId) {
 
     const onSuccess = async (client) => {
       await db.updateServerStatus(serverId, 'running');
-      activeConnections.set(serverId, { client, stopped: false, startedAt: new Date().toISOString() });
+      // تصفير العداد من ينجح بالاتصال
+      activeConnections.set(serverId, { client, stopped: false, startedAt: new Date().toISOString(), retries: 0 });
       telegramBot.telegram.editMessageText(
         chatId, messageId, null,
         `✅ انضم البوت بنجاح إلى \`${fresh.host}:${fresh.port || (fresh.type === 'java' ? 25565 : 19132)}\`!`,
@@ -215,10 +216,25 @@ async function startMinecraftBot(serverId, telegramBot, chatId, messageId) {
       const conn = activeConnections.get(serverId);
       if (conn?.client?._afkInterval) clearInterval(conn.client._afkInterval);
       if (!conn || conn.stopped) { await db.updateServerStatus(serverId, 'stopped'); return; }
+
+      // 🛡️ إضافة نظام عدد المحاولات لمنع انهيار الاستضافة
+      conn.retries = (conn.retries || 0) + 1;
+      if (conn.retries > 3) {
+        conn.stopped = true;
+        activeConnections.delete(serverId);
+        await db.updateServerStatus(serverId, 'error');
+        telegramBot.telegram.sendMessage(
+          chatId,
+          `❌ فشل الاتصال بسيرفر *${fresh.name}* بعد 3 محاولات.\nتم إيقاف البوت تلقائياً لحماية الاستضافة، تأكد أن السيرفر يعمل.`,
+          { parse_mode: 'Markdown' }
+        ).catch(() => {});
+        return;
+      }
+
       await db.updateServerStatus(serverId, 'reconnecting');
       telegramBot.telegram.sendMessage(
         chatId,
-        `⚠️ انقطع الاتصال بـ *${fresh.name}*. جاري إعادة الاتصال خلال 5 ثواني...`,
+        `⚠️ انقطع الاتصال بـ *${fresh.name}*. محاولة (${conn.retries}/3) لإعادة الاتصال...`,
         { parse_mode: 'Markdown' }
       ).catch(() => {});
       reconnect();
@@ -228,9 +244,11 @@ async function startMinecraftBot(serverId, telegramBot, chatId, messageId) {
     else connectBedrock(fresh, onSuccess, onError, onDisconnect);
   };
 
-  activeConnections.set(serverId, { client: null, stopped: false, startedAt: new Date().toISOString() });
+  // تهيئة العداد لأول مرة
+  activeConnections.set(serverId, { client: null, stopped: false, startedAt: new Date().toISOString(), retries: 0 });
   launchConnection();
 }
+
 
 function stopMinecraftBot(serverId) {
   const conn = activeConnections.get(serverId);
@@ -731,14 +749,20 @@ bot.action(/^start_bot_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const serverId = ctx.match[1];
   const server   = await db.getServer(serverId);
+  
   if (!server || server.user_id !== ctx.from.id) return;
   if (activeConnections.has(serverId)) return ctx.answerCbQuery('⚠️ البوت يعمل بالفعل.', { show_alert: true });
+  
   const edited = await ctx.editMessageText(
     `🟡 جاري الاتصال بـ \`${server.host}:${server.port}\`...`,
     { parse_mode: 'Markdown' }
   );
-  await startMinecraftBot(serverId, bot, ctx.chat.id, edited.message_id);
+  
+  // 🔥 الضربة القاضية: شلنا كلمة await من هنا 
+  // هسه البوت راح يشغل الاتصال بالخلفية ويرجع يجاوب بقية الناس بنفس اللحظة بدون توقف!
+  startMinecraftBot(serverId, bot, ctx.chat.id, edited.message_id).catch(err => console.error(err));
 });
+
 
 bot.action(/^stop_bot_(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
