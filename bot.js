@@ -327,7 +327,7 @@ const addServerScene = new Scenes.WizardScene('add_server',
     return ctx.wizard.next();
   },
   // Step 1: wait for type action → handled in bot.action
-  async () => {},
+async (ctx, next) => next(),
   // Step 2: receive IP
   async (ctx) => {
     if (!ctx.message?.text) return;
@@ -463,7 +463,7 @@ const addAccountsScene = new Scenes.WizardScene('add_accounts',
     return ctx.wizard.next();
   },
   // Step 1: wait for type action
-  async () => {},
+async (ctx, next) => next(),
   // Step 2: choose method
   async (ctx) => {
     await ctx.reply('📋 كيف تريد إرسال الحسابات؟', Markup.inlineKeyboard([
@@ -472,7 +472,7 @@ const addAccountsScene = new Scenes.WizardScene('add_accounts',
     return ctx.wizard.next();
   },
   // Step 3: wait for method action
-  async () => {},
+async (ctx, next) => next(),
   // Step 4: receive accounts
   async (ctx) => {
     let lines = [];
@@ -562,7 +562,7 @@ const broadcastScene = new Scenes.WizardScene('broadcast',
     return ctx.wizard.next();
   },
   // Step 1: wait for target action
-  async () => {},
+async (ctx, next) => next(),
   // Step 2: ask for message
   async (ctx) => {
     await ctx.reply('✉️ أرسل الرسالة التي تريد إذاعتها (نص أو صورة أو فيديو):',
