@@ -2,7 +2,7 @@
 
 const mongoose = require('mongoose');
 
-const MONGO_URI = 'mongodb+srv://markforme771:sosmVO6GbIMyiePS@cluster0.mongodb.net/?retryWrites=true&w=majority';
+const MONGO_URI = 'mongodb+srv://markforme771:sosmVO6GbIMyiePS@cluster0.nrwubmy.mongodb.net/?appName=Cluster0';
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
