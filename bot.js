@@ -1,5 +1,9 @@
 'use strict';
 
+const http = require('http');
+http.createServer((req, res) => res.end('Bot is running!')).listen(7860, () => console.log('🌐 خادم الويب يعمل على المنفذ 7860...'));
+
+
 process.on('uncaughtException',  err => console.error('UncaughtException:',  err));
 process.on('unhandledRejection', err => console.error('UnhandledRejection:', err));
 
