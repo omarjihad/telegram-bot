@@ -5,13 +5,14 @@ import threading
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
-from telegram.request import HTTPXRequest  # الاستدعاء الجديد لحل مشكلة التايم أوت
+from telegram.request import HTTPXRequest
 
-# إعدادات تسجيل الأخطاء
+# إعدادات تسجيل الأخطاء بصمت
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.ERROR)
 
 TOKEN = '8679057078:AAF0KIf-GtSSMPoHovqeOiiaM80CmDy8GGY'
 
+# نظام الكاش (20 ثانية) لضمان السرعة ومنع الحظر
 CACHE_TIME = 20
 last_fetch_time = 0
 cached_msg = ""
@@ -36,10 +37,10 @@ async def get_all_prices():
 
                 usd_iqd = 153000
 
-                                # التصميم النهائي مع قفل سطر الدولار بالـ LRM
+                # التصميم النهائي: استخدمنا \u2067 و \u2069 لقفل اتجاه السطر ومنع نزول الضفدع
                 msg = (
                     f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
-                    f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> الدولار (100$): \u200e{usd_iqd:,} IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u200e\n'
+                    f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> الدولار (100$): \u2067{usd_iqd:,} IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
                     "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                     f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: ${btc:,}\n'
                     f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: ${ton}\n'
@@ -49,67 +50,69 @@ async def get_all_prices():
                     f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية</i>\n'
                     f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji>'
                 )
-
                 
                 cached_msg = msg
                 last_fetch_time = current_time
                 return msg
-
-    except Exception as e:
-        if cached_msg:
-            return cached_msg
-        return "⚠️ عذراً، اكو ضغط على السيرفر، حاول ثواني.."
+    except Exception:
+        return cached_msg if cached_msg else "⚠️ عذراً، حاول ثواني.."
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message and update.message.text:
-        text = update.message.text.lower()
+    if not update.message or not update.message.text:
+        return
 
-        exact_shortcuts = ["ص", "صر", "صرف", "تون"]
-        keywords = ["أسعار العملات", "اسعار العملات", "الأسعار", "السعر", "دولار", "بتكوين", "ايثيريوم", "ايثر", "سولانا", "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "ton"]
+    text = update.message.text.strip().lower()
+    
+    # 1. الكلمات الممنوعة (إذا انوجدت بالرسالة يكنسل فوراً)
+    forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
+    if any(word in text for word in forbidden):
+        return
 
-        if text in exact_shortcuts or any(word in text for word in keywords):
-            prices_msg = await get_all_prices()
-            await update.message.reply_text(prices_msg, parse_mode='HTML')
+    # 2. الكلمات المسموحة (لازم الرسالة تحتوي على وحدة منها على الأقل)
+    allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol"]
+    
+    # 3. الاختصارات الدقيقة أو الجمل الكاملة
+    is_allowed = False
+    if text in ["ص", "صر", "صرف", "تون", "دولار"]: # اختصارات مباشرة
+        is_allowed = True
+    elif any(phrase in text for phrase in ["صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار"]):
+        is_allowed = True
+    elif any(word == text for word in allowed_keywords): # إذا كانت الكلمة وحدها بالرسالة
+        is_allowed = True
+
+    if is_allowed:
+        prices_msg = await get_all_prices()
+        await update.message.reply_text(prices_msg, parse_mode='HTML')
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    print(f"⚠️ رمشة بالنت تم تجاوزها: {context.error}")
+    pass # تجاوز أخطاء الشبكة بصمت
 
-# ==========================================
-# السيرفر الوهمي
-# ==========================================
+# سيرفر وهمي للاستضافة
 web_app = Flask(__name__)
-
 @web_app.route('/')
-def home():
-    return "البوت شغال 100% يالذيب 🔥"
+def home(): return "البوت شغال 🔥"
 
 def run_web():
     web_app.run(host="0.0.0.0", port=7860)
-# ==========================================
 
 def main():
-    # تشغيل السيرفر الوهمي
     threading.Thread(target=run_web, daemon=True).start()
+    time.sleep(8) # انتظار استقرار نت السيرفر
 
-    # إعطاء السيرفر 5 ثواني حتى تستقر شبكة الإنترنت مالته قبل لا يتصل بالتيليجرام
-    print("جاري انتظار استقرار الشبكة...")
-    time.sleep(5)
-
-    # إعدادات اتصال مخصصة للشبكات الضعيفة (انتظار 60 ثانية بدل 10 ثواني)
-    t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=60.0, read_timeout=60.0, write_timeout=60.0, pool_timeout=60.0)
+    t_request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, write_timeout=60.0)
 
     app = (
         Application.builder()
         .token(TOKEN)
-        .request(t_request) # ربط الإعدادات المخصصة بالبوت
+        .request(t_request)
         .build()
     )
     
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_error_handler(error_handler)
     
-    print("--- البوت المطور شغال الآن ومستعد للرفع ---")
-    app.run_polling(drop_pending_updates=True)
+    print("--- البوت شغال الآن بأفضل أداء ---")
+    app.run_polling(drop_pending_updates=True, bootstrap_retries=10)
 
 if __name__ == "__main__":
     main()
