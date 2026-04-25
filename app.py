@@ -36,9 +36,10 @@ async def get_all_prices():
 
                 usd_iqd = 153000
 
+                                # التصميم النهائي مع قفل سطر الدولار بالـ LRM
                 msg = (
                     f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
-                    f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> الدولار (100$): {usd_iqd:,} IQD \u200f<tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\n'
+                    f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> الدولار (100$): \u200e{usd_iqd:,} IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u200e\n'
                     "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                     f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: ${btc:,}\n'
                     f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: ${ton}\n'
@@ -48,6 +49,7 @@ async def get_all_prices():
                     f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية</i>\n'
                     f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji>'
                 )
+
                 
                 cached_msg = msg
                 last_fetch_time = current_time
