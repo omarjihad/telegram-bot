@@ -1,21 +1,18 @@
-# استخدام نسخة Node.js المستقرة والخالية من الأخطاء
-FROM node:20
+# استخدام نسخة بايثون خفيفة وسريعة
+FROM python:3.11-slim
 
-# تحديد مسار العمل
-WORKDIR /usr/src/app
+# تحديد مجلد العمل داخل السيرفر
+WORKDIR /app
 
-# تثبيت cmake المطلوب لبناء مكتبة ماين كرافت الجوال
-RUN apt-get update && apt-get install -y cmake
+# نسخ ملف المتطلبات وتثبيت المكاتب
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# نسخ قائمة المكاتب وتثبيتها
-COPY package*.json ./
-RUN npm install
-
-# نسخ باقي الملفات
+# نسخ كل ملفات البوت (app.py وباقي الملفات)
 COPY . .
 
-# فتح المنفذ المطلوب
+# فتح البورت الخاص بـ Hugging Face
 EXPOSE 7860
 
-# أمر التشغيل
-CMD [ "node", "server.js" ]
+# أمر تشغيل البوت
+CMD ["python", "app.py"]
