@@ -12,7 +12,7 @@ from telegram.request import HTTPXRequest
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-TOKEN = '8679057078:AAF0KIf-GtSSMPoHovqeOiiaM80CmDy8GGY'
+TOKEN = '8679057078:AAH27klAkXPLu9bWVr-_jhmg06gdYvefVps'
 
 CACHE_TIME = 5
 last_fetch_time = 0
