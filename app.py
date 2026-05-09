@@ -1,3 +1,4 @@
+import os
 import time
 import aiohttp
 import logging
@@ -9,9 +10,10 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
-# إعدادات تسجيل الأخطاء بصمت
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.ERROR)
+# 1. إعدادات اللوج صارت INFO حتى نشوف شكو ماكو بـ Koyeb
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# ⚠️ لا تنسى تغير التوكن إذا سويتله Revoke من BotFather
 TOKEN = '8679057078:AAF0KIf-GtSSMPoHovqeOiiaM80CmDy8GGY'
 
 # نظام الكاش (10 ثواني) لضمان أقصى سرعة بدون حظر السيرفر
@@ -36,8 +38,8 @@ async def fetch_iqd_price(session):
                     match = re.search(r'(\d{3}(?:,\d{3})*|\d{5,6})', clean_text)
                     if match:
                         return match.group(1).replace(',', '') # إرجاع الرقم الصافي
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ خطأ بسحب سعر الدولار: {e}")
     return None
 
 async def get_all_prices():
@@ -86,7 +88,8 @@ async def get_all_prices():
             cached_msg = msg
             last_fetch_time = current_time
             return msg
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ خطأ بجلب الأسعار: {e}")
         return cached_msg if cached_msg else "⚠️ عذراً، حاول ثواني.."
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -95,15 +98,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip().lower()
     
-    # 1. الكلمات الممنوعة
+    # الكلمات الممنوعة
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word in text for word in forbidden):
         return
 
-    # 2. الكلمات المسموحة
+    # الكلمات المسموحة
     allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol"]
     
-    # 3. الفحص
+    # الفحص
     is_allowed = False
     if text in ["ص", "صر", "صرف", "تون", "دولار"]:
         is_allowed = True
@@ -116,8 +119,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prices_msg = await get_all_prices()
         await update.message.reply_text(prices_msg, parse_mode='HTML')
 
+# 2. تعديل دالة الأخطاء حتى تطبعلنا المشكلة باللوجات
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    pass # تجاوز أخطاء الشبكة بصمت
+    print(f"⚠️ ظهر خطأ بالبوت: {context.error}")
 
 # سيرفر وهمي للاستضافة
 web_app = Flask(__name__)
@@ -125,7 +129,9 @@ web_app = Flask(__name__)
 def home(): return "البوت شغال 🔥"
 
 def run_web():
-    web_app.run(host="0.0.0.0", port=7860)
+    # 3. سحب البورت تلقائياً من Koyeb أو استخدام 8000
+    port = int(os.environ.get("PORT", 8000))
+    web_app.run(host="0.0.0.0", port=port)
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
@@ -143,7 +149,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_error_handler(error_handler)
     
-    print("--- البوت شغال الآن بأفضل أداء ---")
+    print("--- البوت شغال الآن ومستعد للعمل على Koyeb ---")
     app.run_polling(drop_pending_updates=True, bootstrap_retries=10)
 
 if __name__ == "__main__":
