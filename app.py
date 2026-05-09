@@ -14,7 +14,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 TOKEN = '8679057078:AAF0KIf-GtSSMPoHovqeOiiaM80CmDy8GGY'
 
-CACHE_TIME = 10
+CACHE_TIME = 5
 last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = "152000" 
