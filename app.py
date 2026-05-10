@@ -83,7 +83,7 @@ async def update_prices_if_needed():
                 "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                 f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc_int:,}</b>\n'
                 f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: <b>${ton_val:,.2f}</b>\n'
-                f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> Ethereum: <b>${eth_int:,}</b>\n' 
+                f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> Ethereum: <b>${eth_int:,}</b>\n'
                 f'<tg-emoji emoji-id="6034974692115221805">☀️</tg-emoji> Solana: <b>${sol_val:,.2f}</b>\n'
                 "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                 f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية والمحلية</i>\n'
@@ -138,7 +138,8 @@ def generate_conversion_msg(amount, currency_str):
 
     msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
     
-    if base != 'USD':
+    # التعديل هنا: السطر يظهر للماستر وكل العملات باستثناء (دولار)
+    if curr not in ['دولار', 'usdt', 'usd']:
         msg += f'💵 بالدولار: <b>${usd_val:,.2f}</b>\n'
         
     msg += f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> بالعراقي: \u2067<b>{iqd_val:,.0f}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
@@ -180,10 +181,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply, parse_mode='HTML')
         return
 
-    allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol"]
+    allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol", "ماستر"]
     is_allowed = False
     
-    if text in ["ص", "صر", "صرف", "تون", "دولار"]:
+    if text in ["ص", "صر", "صرف", "تون", "دولار", "ماستر"]:
         is_allowed = True
     elif any(phrase in text for phrase in ["صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار"]):
         is_allowed = True
