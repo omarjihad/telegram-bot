@@ -20,9 +20,9 @@ TOKEN = '8679057078:AAH27klAkXPLu9bWVr-_jhmg06gdYvefVps'
 CACHE_TIME = 5
 last_fetch_time = 0
 cached_msg = ""
-last_known_iqd = 153000 # السعر الافتراضي للـ 100$
+last_known_iqd = 153000
 
-# متغيرات جلوبال لحفظ أسعار العملات واستخدامها بالحاسبة
+# متغيرات جلوبال لحفظ أسعار العملات
 crypto_prices = {'BTC': 0, 'TON': 0, 'ETH': 0, 'SOL': 0}
 
 async def fetch_mastercard_price(session):
@@ -46,7 +46,6 @@ async def fetch_mastercard_price(session):
     return None
 
 async def update_prices_if_needed():
-    """دالة مركزية لتحديث الأسعار وتوليد النشرة الرئيسية"""
     global last_fetch_time, cached_msg, last_known_iqd, crypto_prices
     current_time = time.time()
     
@@ -65,7 +64,6 @@ async def update_prices_if_needed():
                 crypto_data = await response.json()
                 prices = {item['symbol']: float(item['price']) for item in crypto_data}
                 
-                # حفظ الأسعار بالمتغيرات الجلوبال حتى تستخدمها الحاسبة
                 crypto_prices['BTC'] = prices.get('BTCUSDT', 0)
                 crypto_prices['TON'] = prices.get('TONUSDT', 0)
                 crypto_prices['ETH'] = prices.get('ETHUSDT', 0)
@@ -100,10 +98,8 @@ async def update_prices_if_needed():
         return False
 
 def generate_conversion_msg(amount, currency_str):
-    """دالة حاسبة الصرافة وتوليد رسالة التصريف"""
     curr = currency_str.lower()
     
-    # تحديد نوع العملة واسمها
     if curr in ['دولار', 'usdt', 'usd', 'ماستر']:
         base = 'USD'
         name = "دولار (USDT)"
@@ -122,7 +118,6 @@ def generate_conversion_msg(amount, currency_str):
     else:
         return "⚠️ عذراً، العملة غير مدعومة."
 
-    # حساب القيمة بالدولار كقاعدة أساسية للتحويل
     usd_val = 0
     if base == 'USD':
         usd_val = amount
@@ -130,35 +125,34 @@ def generate_conversion_msg(amount, currency_str):
         usd_val = amount * crypto_prices[base]
 
     if usd_val == 0:
-        return "⚠️ عذراً، لا يمكن حساب القيمة الآن، قد تكون الأسعار غير متوفرة."
+        return "⚠️ عذراً، لا يمكن حساب القيمة الآن."
 
-    # تحويل الدولار إلى باقي العملات
     iqd_val = (usd_val * last_known_iqd) / 100
     ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
     btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
     eth_val = usd_val / crypto_prices['ETH'] if crypto_prices.get('ETH') else 0
     sol_val = usd_val / crypto_prices['SOL'] if crypto_prices.get('SOL') else 0
 
-    # تصميم رسالة الصرافة (استخدمت ايموجيات عادية لمنع أي خطأ بالتليكرام)
-    msg = f"💱 <b>تصريف {amount:g} {name}:</b>\n\n"
+    # تصميم رسالة الحاسبة بالملصقات المميزة
+    msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
     
     if base != 'USD':
-        msg += f"💵 بالدولار: <b>${usd_val:,.2f}</b>\n"
+        msg += f'💵 بالدولار: <b>${usd_val:,.2f}</b>\n'
         
-    msg += f"🇮🇶 بالعراقي: <b>{iqd_val:,.0f}</b> د.ع\n"
+    msg += f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> بالعراقي: \u2067<b>{iqd_val:,.0f}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
     msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
     
     if base != 'TON' and ton_val > 0:
-        msg += f"💎 تون: <b>{ton_val:,.2f}</b> TON\n"
+        msg += f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> تون: <b>{ton_val:,.2f}</b> TON\n'
     if base != 'BTC' and btc_val > 0:
-        msg += f"🪙 بتكوين: <b>{btc_val:,.6f}</b> BTC\n"
+        msg += f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> بتكوين: <b>{btc_val:,.6f}</b> BTC\n'
     if base != 'ETH' and eth_val > 0:
-        msg += f"💠 إيثيريوم: <b>{eth_val:,.5f}</b> ETH\n"
+        msg += f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> إيثيريوم: <b>{eth_val:,.5f}</b> ETH\n'
     if base != 'SOL' and sol_val > 0:
-        msg += f"☀️ سولانا: <b>{sol_val:,.2f}</b> SOL\n"
+        msg += f'<tg-emoji emoji-id="6034974692115221805">☀️</tg-emoji> سولانا: <b>{sol_val:,.2f}</b> SOL\n'
         
     msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-    msg += f"Dev : 👨‍💻 | <b>الروسي</b>"
+    msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
     
     return msg
 
@@ -172,8 +166,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(word in text for word in forbidden):
         return
 
-    # 1. فحص طلبات الحاسبة والتصريف أولاً (الـ Regex الذكي)
-    # يصيد: 10 تون، 10ton، صرف 10 دولار، 5.5 usdt، 10 ماستر، الخ..
     calc_pattern = r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|بتكوين|بيتكوين|btc|bitcoin|ايثيريوم|إيثيريوم|eth|ethereum|سولانا|sol|solana)'
     calc_match = re.search(calc_pattern, text)
     
@@ -184,9 +176,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update_prices_if_needed()
         reply = generate_conversion_msg(amount, currency_str)
         await update.message.reply_text(reply, parse_mode='HTML')
-        return # نوقف التنفيذ هنا حتى ما يدز النشرة العادية
+        return
 
-    # 2. فحص طلبات النشرة العادية (إذا ماكو أرقام)
     allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol"]
     is_allowed = False
     
