@@ -12,7 +12,7 @@ from telegram.request import HTTPXRequest
 # إعدادات اللوج
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# التوكن مالتك (الجديد)
+# التوكن مالتك (الجدييد)
 TOKEN = '8679057078:AAH27klAkXPLu9bWVr-_jhmg06gdYvefVps'
 
 # نظام الكاش (5 ثواني)
