@@ -10,16 +10,21 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
+# إعدادات اللوج
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# التوكن الخاص بيك
 TOKEN = '8679057078:AAH27klAkXPLu9bWVr-_jhmg06gdYvefVps'
 
+# نظام الكاش (5 ثواني لتحديث شبه لحظي)
 CACHE_TIME = 5
 last_fetch_time = 0
 cached_msg = ""
-last_known_iqd = "152000" 
+last_known_iqd = "152000"
+last_known_digital = "153000"
 
 async def fetch_iqd_price(session):
+    """سحب سعر الدولار النقدي من قناة التليكرام"""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         async with session.get("https://t.me/s/borsat_alkfah", headers=headers, timeout=5) as response:
@@ -32,11 +37,42 @@ async def fetch_iqd_price(session):
                     if match:
                         return match.group(1).replace(',', '') 
     except Exception as e:
-        print(f"⚠️ خطأ بسحب سعر الدولار: {e}")
+        print(f"⚠️ خطأ بسحب السعر النقدي: {e}")
+    return None
+
+async def fetch_digital_iqd(session):
+    """سحب سعر الدولار الرقمي (زين كاش/ماستر) من منصة Binance P2P"""
+    try:
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
+        }
+        # طلب بيانات السوق العراقي (IQD) مقابل (USDT)
+        payload = {
+            "fiat": "IQD",
+            "page": 1,
+            "rows": 1,
+            "tradeType": "BUY",
+            "asset": "USDT",
+            "countries": [],
+            "payTypes": [],
+            "publisherType": None,
+            "merchantCheck": False
+        }
+        async with session.post(url, json=payload, headers=headers, timeout=5) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data.get('data') and len(data['data']) > 0:
+                    price = data['data'][0]['adv']['price']
+                    # السعر لـ 1 دولار، نضربه في 100 لورقة الدولار
+                    return str(int(float(price) * 100))
+    except Exception as e:
+        print(f"⚠️ خطأ بسحب السعر الرقمي من بينانس: {e}")
     return None
 
 async def get_all_prices():
-    global last_fetch_time, cached_msg, last_known_iqd
+    global last_fetch_time, cached_msg, last_known_iqd, last_known_digital
     current_time = time.time()
     
     if current_time - last_fetch_time < CACHE_TIME and cached_msg:
@@ -44,37 +80,45 @@ async def get_all_prices():
         
     try:
         async with aiohttp.ClientSession() as session:
-            # 🟢 تغيير الرابط إلى API بينانس الموثوق (سيرفراتهم ما تحظر استضافات Koyeb)
-            binance_url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT","SOLUSDT","TONUSDT"]'
+            # روابط API بينانس
+            crypto_url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT","SOLUSDT","TONUSDT"]'
             
-            crypto_task = session.get(binance_url, timeout=10)
+            # جلب كل الأسعار بنفس اللحظة
+            crypto_task = session.get(crypto_url, timeout=10)
             iqd_task = fetch_iqd_price(session)
+            digital_task = fetch_digital_iqd(session)
             
-            response, iqd_price_str = await asyncio.gather(crypto_task, iqd_task, return_exceptions=True)
+            response, iqd_price_str, digital_price_str = await asyncio.gather(
+                crypto_task, iqd_task, digital_task, return_exceptions=True
+            )
             
-            # 🟢 معالجة بيانات الكريبتو من بينانس
+            # معالجة بيانات الكريبتو
             btc = ton = eth = sol = 0
             if not isinstance(response, Exception) and response.status == 200:
                 crypto_data = await response.json()
-                # تحويل البيانات إلى قاموس حتى نسحب السعر بسرعة
                 prices = {item['symbol']: float(item['price']) for item in crypto_data}
                 
                 btc = int(prices.get('BTCUSDT', 0))
                 ton = round(prices.get('TONUSDT', 0), 2)
                 eth = int(prices.get('ETHUSDT', 0))
                 sol = round(prices.get('SOLUSDT', 0), 2)
-            else:
-                print("⚠️ مشكلة بالوصول لأسعار الكريبتو")
 
-            # تحديث السعر إذا تم جلبه بنجاح من قناة التليكرام
+            # تحديث السعر النقدي إذا تم جلبه بنجاح
             if isinstance(iqd_price_str, str) and iqd_price_str.isdigit():
                 last_known_iqd = iqd_price_str
                 
+            # تحديث السعر الرقمي (زين كاش) إذا تم جلبه بنجاح
+            if isinstance(digital_price_str, str) and digital_price_str.isdigit():
+                last_known_digital = digital_price_str
+                
             usd_iqd_int = int(last_known_iqd)
+            usd_digital_int = int(last_known_digital)
 
+            # رسالة البوت بتصميمها الجديد
             msg = (
                 f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
-                f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> الدولار (100$): \u2067<b>{usd_iqd_int:,}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
+                f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> دولار نقدي (100$): \u2067<b>{usd_iqd_int:,}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
+                f'<tg-emoji emoji-id="5451732530048802484">💳</tg-emoji> دولار رقمي (زين كاش): \u2067<b>{usd_digital_int:,}</b> IQD <tg-emoji emoji-id="5208475215041913910">💸</tg-emoji>\u2069\n'
                 "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                 f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc:,}</b>\n'
                 f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: <b>${ton}</b>\n'
@@ -105,7 +149,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol"]
     
     is_allowed = False
-    if text in ["ص", "صر", "صرف", "تون", "دولار"]:
+    if text in ["ص", "صر", "صرف", "تون", "دولار", "رقمي", "زين كاش", "ماستر"]:
         is_allowed = True
     elif any(phrase in text for phrase in ["صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار"]):
         is_allowed = True
@@ -144,7 +188,6 @@ def main():
     app.add_error_handler(error_handler)
     
     print("--- البوت شغال الآن ومستعد للعمل على Koyeb ---")
-    app.bot.delete_webhook(drop_pending_updates=True)
     app.run_polling(drop_pending_updates=True, bootstrap_retries=10)
 
 if __name__ == "__main__":
