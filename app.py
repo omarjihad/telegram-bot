@@ -100,32 +100,44 @@ async def update_prices_if_needed():
 def generate_conversion_msg(amount, currency_str):
     curr = currency_str.lower()
     
+    show_usd = True
+    show_iqd = True
+
     if curr in ['دولار', 'usdt', 'usd']:
         base = 'USD'
         name = "دولار (USDT)"
+        usd_val = amount
+        show_usd = False  
+
     elif curr == 'ماستر':
-        base = 'USD'
+        base = 'IQD'
         name = "ماستر"
+        # التعديل الذكي للسوق العراقي:
+        # أي رقم يكتبه تحت الـ 100 ألف نضربه بـ 1000، وغيره نعوفه صافي
+        actual_iqd = amount * 1000 if amount < 100000 else amount
+        
+        # تحويل الدينار إلى دولار حسب السعر المسحوب
+        usd_val = actual_iqd / (last_known_iqd / 100)
+        show_iqd = False  
+
     elif curr in ['تون', 'ton']:
         base = 'TON'
         name = "تون (TON)"
+        usd_val = amount * crypto_prices.get('TON', 0)
     elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']:
         base = 'BTC'
         name = "بتكوين (BTC)"
+        usd_val = amount * crypto_prices.get('BTC', 0)
     elif curr in ['ايثيريوم', 'إيثيريوم', 'eth', 'ethereum']:
         base = 'ETH'
         name = "إيثيريوم (ETH)"
+        usd_val = amount * crypto_prices.get('ETH', 0)
     elif curr in ['سولانا', 'sol', 'solana']:
         base = 'SOL'
         name = "سولانا (SOL)"
+        usd_val = amount * crypto_prices.get('SOL', 0)
     else:
         return "⚠️ عذراً، العملة غير مدعومة."
-
-    usd_val = 0
-    if base == 'USD':
-        usd_val = amount
-    elif base in crypto_prices and crypto_prices[base] > 0:
-        usd_val = amount * crypto_prices[base]
 
     if usd_val == 0:
         return "⚠️ عذراً، لا يمكن حساب القيمة الآن."
@@ -138,11 +150,12 @@ def generate_conversion_msg(amount, currency_str):
 
     msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
     
-    # التعديل هنا: السطر يظهر للماستر وكل العملات باستثناء (دولار)
-    if curr not in ['دولار', 'usdt', 'usd']:
-        msg += f'💵 بالدولار: <b>${usd_val:,.2f}</b>\n'
+    if show_usd:
+        msg += f'💵 بالدولار: \u2067<b>${usd_val:,.2f}</b>\u2069\n'
         
-    msg += f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> بالعراقي: \u2067<b>{iqd_val:,.0f}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
+    if show_iqd:
+        msg += f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> بالعراقي: \u2067<b>{iqd_val:,.0f}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
+        
     msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
     
     if base != 'TON' and ton_val > 0:
