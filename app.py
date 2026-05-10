@@ -83,7 +83,7 @@ async def update_prices_if_needed():
                 "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                 f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc_int:,}</b>\n'
                 f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: <b>${ton_val:,.2f}</b>\n'
-                f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> Ethereum: <b>${eth:,}</b>\n'
+                f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> Ethereum: <b>${eth_int:,}</b>\n' 
                 f'<tg-emoji emoji-id="6034974692115221805">☀️</tg-emoji> Solana: <b>${sol_val:,.2f}</b>\n'
                 "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                 f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية والمحلية</i>\n'
@@ -100,7 +100,6 @@ async def update_prices_if_needed():
 def generate_conversion_msg(amount, currency_str):
     curr = currency_str.lower()
     
-    # فصلنا الماستر عن الدولار حتى ينطبع اسمه بشكل صحيح
     if curr in ['دولار', 'usdt', 'usd']:
         base = 'USD'
         name = "دولار (USDT)"
