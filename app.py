@@ -116,12 +116,10 @@ def generate_conversion_msg(amount, currency_str):
         usd_val = actual_iqd / (last_known_iqd / 100)
         show_iqd = False  
 
-    # إضافة النجوم هنا مع الاختصارات اللي ردتها
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']:
         base = 'STARS'
-        # الملصق المميز مالتك 
         name = '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم'
-        usd_val = amount * 0.015 # سعر الشراء من فراقمنت
+        usd_val = amount * 0.015 
         
     elif curr in ['تون', 'ton']:
         base = 'TON'
@@ -145,8 +143,10 @@ def generate_conversion_msg(amount, currency_str):
     if usd_val == 0:
         return "⚠️ عذراً، لا يمكن حساب القيمة الآن."
 
+    # حساب كل القيم
     iqd_val = (usd_val * last_known_iqd) / 100
     ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
+    stars_val = usd_val / 0.015 # حساب كمية النجوم
     btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
     eth_val = usd_val / crypto_prices['ETH'] if crypto_prices.get('ETH') else 0
     sol_val = usd_val / crypto_prices['SOL'] if crypto_prices.get('SOL') else 0
@@ -164,7 +164,10 @@ def generate_conversion_msg(amount, currency_str):
     if base != 'TON' and ton_val > 0:
         msg += f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> تون: <b>{ton_val:,.2f}</b> TON\n'
         
-    # نخفي باقي العملات إذا كانت العملة "نجوم"
+    # ضفنا عرض النجوم هنا لأي عملة عدا إذا كانت هي أصلاً نجوم
+    if base != 'STARS' and stars_val > 0:
+        msg += f'<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم: <b>{stars_val:,.0f}</b> Stars\n'
+        
     if base != 'STARS':
         if base != 'BTC' and btc_val > 0:
             msg += f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> بتكوين: <b>{btc_val:,.6f}</b> BTC\n'
@@ -188,7 +191,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(word in text for word in forbidden):
         return
 
-    # التحديث هنا: إضافة كل الاختصارات مال النجوم للريجيكس (نج، نجمه، نجوم..)
     calc_pattern = r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|بتكوين|بيتكوين|btc|bitcoin|ايثيريوم|إيثيريوم|eth|ethereum|سولانا|sol|solana|نجمه|نجمة|نجوم|star|stars|نج)'
     calc_match = re.search(calc_pattern, text)
     
