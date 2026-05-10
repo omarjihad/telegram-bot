@@ -112,14 +112,17 @@ def generate_conversion_msg(amount, currency_str):
     elif curr == 'ماستر':
         base = 'IQD'
         name = "ماستر"
-        # التعديل الذكي للسوق العراقي:
-        # أي رقم يكتبه تحت الـ 100 ألف نضربه بـ 1000، وغيره نعوفه صافي
         actual_iqd = amount * 1000 if amount < 100000 else amount
-        
-        # تحويل الدينار إلى دولار حسب السعر المسحوب
         usd_val = actual_iqd / (last_known_iqd / 100)
         show_iqd = False  
 
+    # إضافة النجوم هنا مع الاختصارات اللي ردتها
+    elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']:
+        base = 'STARS'
+        # الملصق المميز مالتك 
+        name = '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم'
+        usd_val = amount * 0.015 # سعر الشراء من فراقمنت
+        
     elif curr in ['تون', 'ton']:
         base = 'TON'
         name = "تون (TON)"
@@ -151,7 +154,7 @@ def generate_conversion_msg(amount, currency_str):
     msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
     
     if show_usd:
-        msg += f'💵 بالدولار: \u2067<b>${usd_val:,.2f}</b>\u2069\n'
+        msg += f'💵 بالدولار: \u2067<b>${usd_val:,.3f}</b>\u2069\n'
         
     if show_iqd:
         msg += f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> بالعراقي: \u2067<b>{iqd_val:,.0f}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
@@ -160,12 +163,15 @@ def generate_conversion_msg(amount, currency_str):
     
     if base != 'TON' and ton_val > 0:
         msg += f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> تون: <b>{ton_val:,.2f}</b> TON\n'
-    if base != 'BTC' and btc_val > 0:
-        msg += f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> بتكوين: <b>{btc_val:,.6f}</b> BTC\n'
-    if base != 'ETH' and eth_val > 0:
-        msg += f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> إيثيريوم: <b>{eth_val:,.5f}</b> ETH\n'
-    if base != 'SOL' and sol_val > 0:
-        msg += f'<tg-emoji emoji-id="6034974692115221805">☀️</tg-emoji> سولانا: <b>{sol_val:,.2f}</b> SOL\n'
+        
+    # نخفي باقي العملات إذا كانت العملة "نجوم"
+    if base != 'STARS':
+        if base != 'BTC' and btc_val > 0:
+            msg += f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> بتكوين: <b>{btc_val:,.6f}</b> BTC\n'
+        if base != 'ETH' and eth_val > 0:
+            msg += f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> إيثيريوم: <b>{eth_val:,.5f}</b> ETH\n'
+        if base != 'SOL' and sol_val > 0:
+            msg += f'<tg-emoji emoji-id="6034974692115221805">☀️</tg-emoji> سولانا: <b>{sol_val:,.2f}</b> SOL\n'
         
     msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
     msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
@@ -182,7 +188,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(word in text for word in forbidden):
         return
 
-    calc_pattern = r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|بتكوين|بيتكوين|btc|bitcoin|ايثيريوم|إيثيريوم|eth|ethereum|سولانا|sol|solana)'
+    # التحديث هنا: إضافة كل الاختصارات مال النجوم للريجيكس (نج، نجمه، نجوم..)
+    calc_pattern = r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|بتكوين|بيتكوين|btc|bitcoin|ايثيريوم|إيثيريوم|eth|ethereum|سولانا|sol|solana|نجمه|نجمة|نجوم|star|stars|نج)'
     calc_match = re.search(calc_pattern, text)
     
     if calc_match:
@@ -194,10 +201,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply, parse_mode='HTML')
         return
 
-    allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol", "ماستر"]
+    allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol", "ماستر", "نجوم", "نجمة", "نج"]
     is_allowed = False
     
-    if text in ["ص", "صر", "صرف", "تون", "دولار", "ماستر"]:
+    if text in ["ص", "صر", "صرف", "تون", "دولار", "ماستر", "نجوم", "نجمة", "نج"]:
         is_allowed = True
     elif any(phrase in text for phrase in ["صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار"]):
         is_allowed = True
