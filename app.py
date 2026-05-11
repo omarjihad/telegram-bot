@@ -212,11 +212,12 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً.")
         return ConversationHandler.END
         
-    if target_price == current_price:
-        await update.message.reply_text(f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر! ({current_price}) 😅")
+    # التعديل هنا: إذا السعر الحالي أكبر أو يساوي السعر المطلوب، يرفض التنبيه!
+    if current_price >= target_price:
+        await update.message.reply_text(f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر أو متجاوزه! (السعر الحالي: {current_price:g}) 😅")
         return ConversationHandler.END
         
-    direction = 'up' if target_price > current_price else 'down'
+    direction = 'up' # لأن السعر الحالي دائماً راح يكون أصغر من الهدف بهالحالة
     user = update.message.from_user
     
     alerts_db.append({
@@ -268,7 +269,6 @@ async def check_alerts_loop(app: Application):
             
             triggered = False
             if alert['direction'] == 'up' and curr_price >= alert['target']: triggered = True
-            elif alert['direction'] == 'down' and curr_price <= alert['target']: triggered = True
                 
             if triggered:
                 triggered_alerts.append(alert)
@@ -357,7 +357,6 @@ def main():
         .build()
     )
     
-    # التعديل هنا: استخدام MessageHandler مع Regex بدال الـ CommandHandler حتى نقبل العربي
     alert_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^/?نبهني$'), alert_start)],
         states={
