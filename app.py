@@ -246,6 +246,7 @@ async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def check_alerts_loop(app: Application):
+    global alerts_db # التعديل هنا: صعدنا الـ global بالبداية حتى ما تصير مشكلة برمجية
     while True:
         await asyncio.sleep(10) # فحص كل 10 ثواني
         if not alerts_db:
@@ -296,7 +297,6 @@ async def check_alerts_loop(app: Application):
                         print(f"فشل إرسال التنبيه: {e}")
                         
         # مسح التنبيهات اللي تحققت
-        global alerts_db
         alerts_db = [a for a in alerts_db if a['active']]
 
 async def post_init(app: Application):
