@@ -7,7 +7,7 @@ import asyncio
 import re
 from flask import Flask
 from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, ConversationHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, ConversationHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
 # إعدادات اللوج
@@ -173,8 +173,9 @@ async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     curr_input = update.message.text.strip()
-    if curr_input.startswith('/'): return ConversationHandler.END
-    
+    if curr_input.startswith('/ايقاف') or curr_input == 'ايقاف': 
+        return await stop_alerts(update, context)
+        
     curr_code = normalize_currency(curr_input)
     if not curr_code:
         await update.message.reply_text("⚠️ عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح (مثال: تون):")
@@ -192,6 +193,9 @@ async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price_input = update.message.text.strip()
+    if price_input.startswith('/ايقاف') or price_input == 'ايقاف': 
+        return await stop_alerts(update, context)
+
     match = re.search(r'(\d+(?:\.\d+)?)', price_input)
     if not match:
         await update.message.reply_text("⚠️ يرجى إدخال رقم صحيح:")
@@ -228,7 +232,7 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         f"✅ <b>تم التفعيل!</b>\n"
-        f"سيتم تنبيهك فور وصول الـ {curr_name} إلى <code>{target_price}</code>\n\n"
+        f"سيتم تنبيهك فور وصول الـ {curr_name} إلى <code>{target_price:g}</code>\n\n"
         f"لإيقاف التنبيه ارسل /ايقاف", parse_mode='HTML'
     )
     return ConversationHandler.END
@@ -246,7 +250,7 @@ async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def check_alerts_loop(app: Application):
-    global alerts_db # التعديل هنا: صعدنا الـ global بالبداية حتى ما تصير مشكلة برمجية
+    global alerts_db 
     while True:
         await asyncio.sleep(10) # فحص كل 10 ثواني
         if not alerts_db:
@@ -271,7 +275,6 @@ async def check_alerts_loop(app: Application):
                 alert['active'] = False
         
         if triggered_alerts:
-            # تجميع التنبيهات حسب الكروب والعملة حتى يمنشنهم برسالة وحدة
             grouped = {}
             for alert in triggered_alerts:
                 chat_id = alert['chat_id']
@@ -296,11 +299,9 @@ async def check_alerts_loop(app: Application):
                     except Exception as e:
                         print(f"فشل إرسال التنبيه: {e}")
                         
-        # مسح التنبيهات اللي تحققت
         alerts_db = [a for a in alerts_db if a['active']]
 
 async def post_init(app: Application):
-    # تشغيل مراقب الأسعار بالخلفية
     asyncio.create_task(check_alerts_loop(app))
 
 # --- نهاية نظام التنبيهات ---
@@ -352,24 +353,24 @@ def main():
         Application.builder()
         .token(TOKEN)
         .request(t_request)
-        .post_init(post_init) # تشغيل الخلفية
+        .post_init(post_init) 
         .build()
     )
     
-    # دمج المحادثة الخاصة بالتنبيهات
+    # التعديل هنا: استخدام MessageHandler مع Regex بدال الـ CommandHandler حتى نقبل العربي
     alert_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('نبهني', alert_start)],
+        entry_points=[MessageHandler(filters.Regex(r'^/?نبهني$'), alert_start)],
         states={
             ASK_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, alert_currency)],
             ASK_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, alert_price)]
         },
-        fallbacks=[CommandHandler('ايقاف', stop_alerts)],
+        fallbacks=[MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts)],
         per_chat=True,
         per_user=True
     )
     
     app.add_handler(alert_conv_handler)
-    app.add_handler(CommandHandler('ايقاف', stop_alerts))
+    app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_error_handler(error_handler)
     
