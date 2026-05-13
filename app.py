@@ -212,12 +212,12 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً.")
         return ConversationHandler.END
         
-    # التعديل هنا: إذا السعر الحالي أكبر أو يساوي السعر المطلوب، يرفض التنبيه!
-    if current_price >= target_price:
-        await update.message.reply_text(f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر أو متجاوزه! (السعر الحالي: {current_price:g}) 😅")
+    # التعديل: فقط إذا كان نفس الرقم بالضبط يرفض، وإلا يشوفه صعود أو نزول
+    if target_price == current_price:
+        await update.message.reply_text(f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر بالضبط! (السعر الحالي: {current_price:g}) 😅")
         return ConversationHandler.END
         
-    direction = 'up' # لأن السعر الحالي دائماً راح يكون أصغر من الهدف بهالحالة
+    direction = 'up' if target_price > current_price else 'down'
     user = update.message.from_user
     
     alerts_db.append({
@@ -231,10 +231,13 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'active': True
     })
     
+    dir_text = "صعود 📈" if direction == 'up' else "نزول 📉"
+    
     await update.message.reply_text(
         f"✅ <b>تم التفعيل!</b>\n"
-        f"سيتم تنبيهك فور وصول الـ {curr_name} إلى <code>{target_price:g}</code>\n\n"
-        f"لإيقاف التنبيه ارسل /ايقاف", parse_mode='HTML'
+        f"سيتم تنبيهك عند {dir_text} الـ {curr_name} إلى <code>{target_price:g}</code>\n\n"
+        f"لإيقاف التنبيه ارسل /ايقاف\n"
+        f"لمعرفة تنبيهاتك الحالية ارسل /تنبيهاتي", parse_mode='HTML'
     )
     return ConversationHandler.END
 
@@ -250,10 +253,26 @@ async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ ليس لديك أي تنبيهات مفعلة.")
     return ConversationHandler.END
 
+async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user_alerts = [a for a in alerts_db if a['user_id'] == user_id and a['active']]
+    
+    if not user_alerts:
+        await update.message.reply_text("🔕 لا توجد لديك أي تنبيهات مفعلة حالياً.\n\nلتفعيل تنبيه جديد ارسل: /نبهني")
+        return
+        
+    msg = "🔔 <b>تنبيهاتك الحالية:</b>\n\n"
+    for idx, a in enumerate(user_alerts, 1):
+        dir_emoji = "📈 (صعود)" if a['direction'] == 'up' else "📉 (نزول)"
+        msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code> {dir_emoji}\n"
+        
+    msg += "\nلإيقاف جميع تنبيهاتك ارسل: /ايقاف"
+    await update.message.reply_text(msg, parse_mode='HTML')
+
 async def check_alerts_loop(app: Application):
     global alerts_db 
     while True:
-        await asyncio.sleep(10) # فحص كل 10 ثواني
+        await asyncio.sleep(10) 
         if not alerts_db:
             continue
             
@@ -268,7 +287,9 @@ async def check_alerts_loop(app: Application):
             if curr_price == 0: continue
             
             triggered = False
+            # التعديل: فحص الصعود والنزول
             if alert['direction'] == 'up' and curr_price >= alert['target']: triggered = True
+            elif alert['direction'] == 'down' and curr_price <= alert['target']: triggered = True
                 
             if triggered:
                 triggered_alerts.append(alert)
@@ -292,7 +313,7 @@ async def check_alerts_loop(app: Application):
                     msg = f"🚨 {mentions}\n\n"
                     msg += f"🔥 <b>الحگ! الـ {curr_name} وصل للسعر المطلوب!</b>\n"
                     msg += f"السعر الحالي: <b>{curr_val:g}</b>\n\n"
-                    msg += f"لإيقاف التنبيه ارسل /ايقاف"
+                    msg += f"لإيقاف التنبيهات ارسل /ايقاف"
                     
                     try:
                         await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
@@ -370,6 +391,7 @@ def main():
     
     app.add_handler(alert_conv_handler)
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
+    app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) # التعديل هنا ضفنا أمر تنبيهاتي
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_error_handler(error_handler)
     
