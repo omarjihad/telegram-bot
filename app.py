@@ -6,7 +6,7 @@ import threading
 import asyncio
 import re
 from flask import Flask
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, MessageHandler, ConversationHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
@@ -26,11 +26,35 @@ crypto_prices = {'BTC': 0, 'TON': 0, 'ETH': 0, 'SOL': 0}
 alerts_db = []
 ASK_CURRENCY, ASK_PRICE = range(2)
 
-# --- دالة زر الإعلان الثابت ---
-def get_ad_keyboard():
-    # إنشاء زر إنلاين يحتوي على الرابط المطلوب
-    keyboard = [[InlineKeyboardButton("سوالف المشاهير", url="https://t.me/+tYh0Y_qvfkpkYzli")]]
-    return InlineKeyboardMarkup(keyboard)
+# --- السر هنا: دالة الإرسال المباشر لتخطي المكتبة وفرض اللون الأحمر ---
+async def send_msg_with_red_ad(chat_id, text, reply_to_message_id=None):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "سوالف المشاهير", 
+                        "url": "https://t.me/+tYh0Y_qvfkpkYzli", 
+                        "style": "danger"  # اللون الأحمر!
+                    }
+                ]
+            ]
+        }
+    }
+    
+    # إذا كانت الرسالة رد على رسالة المستخدم
+    if reply_to_message_id:
+        payload["reply_parameters"] = {"message_id": reply_to_message_id}
+        
+    async with aiohttp.ClientSession() as session:
+        try:
+            await session.post(url, json=payload, timeout=10)
+        except Exception as e:
+            print(f"Error sending custom colored message: {e}")
 
 def normalize_currency(curr_str):
     curr = curr_str.lower().strip()
@@ -169,12 +193,12 @@ def generate_conversion_msg(amount, currency_str):
     msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
     return msg
 
-# --- نظام التنبيهات (الجديد) ---
+# --- نظام التنبيهات ---
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "🔔 <b>نظام التنبيهات الذكي</b>\n\n"
     msg += "هذا الأمر يخلي البوت يراقب أسعار العملات بدالك، ومن يوصل السعر للرقم اللي تريده راح يسويلك منشن وينبهك فوراً!\n\n"
     msg += "👇 <b>الآن، اكتب اسم العملة اللي تريد أراقبها (مثال: تون، بتكوين، ماستر...):</b>"
-    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=get_ad_keyboard())
+    await send_msg_with_red_ad(update.message.chat_id, msg, update.message.message_id)
     return ASK_CURRENCY
 
 async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,17 +208,15 @@ async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     curr_code = normalize_currency(curr_input)
     if not curr_code:
-        await update.message.reply_text("⚠️ عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح (مثال: تون):", reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, "⚠️ عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح (مثال: تون):", update.message.message_id)
         return ASK_CURRENCY
     
     context.user_data['alert_curr'] = curr_code
     context.user_data['alert_curr_name'] = curr_input
     
-    await update.message.reply_text(
-        f"✅ تم اختيار: <b>{curr_input}</b>\n\n"
-        f"✍️ الآن ادخل السعر الذي تريد التنبيه عند وصول <b>{curr_input}</b> إليه (أرقام فقط):", 
-        parse_mode='HTML', reply_markup=get_ad_keyboard()
-    )
+    msg = (f"✅ تم اختيار: <b>{curr_input}</b>\n\n"
+           f"✍️ الآن ادخل السعر الذي تريد التنبيه عند وصول <b>{curr_input}</b> إليه (أرقام فقط):")
+    await send_msg_with_red_ad(update.message.chat_id, msg, update.message.message_id)
     return ASK_PRICE
 
 async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -204,7 +226,7 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     match = re.search(r'(\d+(?:\.\d+)?)', price_input)
     if not match:
-        await update.message.reply_text("⚠️ يرجى إدخال رقم صحيح:", reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, "⚠️ يرجى إدخال رقم صحيح:", update.message.message_id)
         return ASK_PRICE
         
     target_price = float(match.group(1))
@@ -215,11 +237,11 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_price = get_current_price(curr_code)
     
     if current_price == 0:
-        await update.message.reply_text("⚠️ عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً.", reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, "⚠️ عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً.", update.message.message_id)
         return ConversationHandler.END
         
     if target_price == current_price:
-        await update.message.reply_text(f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر بالضبط! (السعر الحالي: {current_price:g}) 😅", reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر بالضبط! (السعر الحالي: {current_price:g}) 😅", update.message.message_id)
         return ConversationHandler.END
         
     direction = 'up' if target_price > current_price else 'down'
@@ -238,12 +260,11 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     dir_text = "صعود 📈" if direction == 'up' else "نزول 📉"
     
-    await update.message.reply_text(
-        f"✅ <b>تم التفعيل!</b>\n"
-        f"سيتم تنبيهك عند {dir_text} الـ {curr_name} إلى <code>{target_price:g}</code>\n\n"
-        f"لإيقاف التنبيه ارسل /ايقاف\n"
-        f"لمعرفة تنبيهاتك الحالية ارسل /تنبيهاتي", parse_mode='HTML', reply_markup=get_ad_keyboard()
-    )
+    msg = (f"✅ <b>تم التفعيل!</b>\n"
+           f"سيتم تنبيهك عند {dir_text} الـ {curr_name} إلى <code>{target_price:g}</code>\n\n"
+           f"لإيقاف التنبيه ارسل /ايقاف\n"
+           f"لمعرفة تنبيهاتك الحالية ارسل /تنبيهاتي")
+    await send_msg_with_red_ad(update.message.chat_id, msg, update.message.message_id)
     return ConversationHandler.END
 
 async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,9 +274,9 @@ async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts_db = [a for a in alerts_db if a['user_id'] != user_id]
     
     if len(alerts_db) < initial_len:
-        await update.message.reply_text("🛑 تم إيقاف جميع تنبيهاتك بنجاح.", reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, "🛑 تم إيقاف جميع تنبيهاتك بنجاح.", update.message.message_id)
     else:
-        await update.message.reply_text("⚠️ ليس لديك أي تنبيهات مفعلة.", reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, "⚠️ ليس لديك أي تنبيهات مفعلة.", update.message.message_id)
     return ConversationHandler.END
 
 async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,7 +284,7 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_alerts = [a for a in alerts_db if a['user_id'] == user_id and a['active']]
     
     if not user_alerts:
-        await update.message.reply_text("🔕 لا توجد لديك أي تنبيهات مفعلة حالياً.\n\nلتفعيل تنبيه جديد ارسل: /نبهني", reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, "🔕 لا توجد لديك أي تنبيهات مفعلة حالياً.\n\nلتفعيل تنبيه جديد ارسل: /نبهني", update.message.message_id)
         return
         
     msg = "🔔 <b>تنبيهاتك الحالية:</b>\n\n"
@@ -272,7 +293,7 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code> {dir_emoji}\n"
         
     msg += "\nلإيقاف جميع تنبيهاتك ارسل: /ايقاف"
-    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=get_ad_keyboard())
+    await send_msg_with_red_ad(update.message.chat_id, msg, update.message.message_id)
 
 async def check_alerts_loop(app: Application):
     global alerts_db 
@@ -319,10 +340,8 @@ async def check_alerts_loop(app: Application):
                     msg += f"السعر الحالي: <b>{curr_val:g}</b>\n\n"
                     msg += f"لإيقاف التنبيهات ارسل /ايقاف"
                     
-                    try:
-                        await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML', reply_markup=get_ad_keyboard())
-                    except Exception as e:
-                        print(f"فشل إرسال التنبيه: {e}")
+                    # نستخدم الدالة الخاصة مالتنا هنا همين
+                    await send_msg_with_red_ad(chat_id, msg)
                         
         alerts_db = [a for a in alerts_db if a['active']]
 
@@ -344,7 +363,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(calc_match.group(1)); currency_str = calc_match.group(2)
         await update_prices_if_needed()
         reply = generate_conversion_msg(amount, currency_str)
-        await update.message.reply_text(reply, parse_mode='HTML', reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, reply, update.message.message_id)
         return
 
     allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol", "ماستر", "نجوم", "نجمة", "نج"]
@@ -356,7 +375,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_allowed:
         await update_prices_if_needed()
         reply = cached_msg if cached_msg else "⚠️ عذراً، حاول ثواني.."
-        await update.message.reply_text(reply, parse_mode='HTML', reply_markup=get_ad_keyboard())
+        await send_msg_with_red_ad(update.message.chat_id, reply, update.message.message_id)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"⚠️ ظهر خطأ بالبوت: {context.error}")
