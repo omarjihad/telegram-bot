@@ -6,7 +6,7 @@ import threading
 import asyncio
 import re
 from flask import Flask
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, ConversationHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
@@ -25,6 +25,12 @@ crypto_prices = {'BTC': 0, 'TON': 0, 'ETH': 0, 'SOL': 0}
 # قاعدة بيانات التنبيهات (في الذاكرة)
 alerts_db = []
 ASK_CURRENCY, ASK_PRICE = range(2)
+
+# --- دالة زر الإعلان الثابت ---
+def get_ad_keyboard():
+    # إنشاء زر إنلاين يحتوي على الرابط المطلوب
+    keyboard = [[InlineKeyboardButton("سوالف المشاهير", url="https://t.me/+tYh0Y_qvfkpkYzli")]]
+    return InlineKeyboardMarkup(keyboard)
 
 def normalize_currency(curr_str):
     curr = curr_str.lower().strip()
@@ -168,7 +174,7 @@ async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "🔔 <b>نظام التنبيهات الذكي</b>\n\n"
     msg += "هذا الأمر يخلي البوت يراقب أسعار العملات بدالك، ومن يوصل السعر للرقم اللي تريده راح يسويلك منشن وينبهك فوراً!\n\n"
     msg += "👇 <b>الآن، اكتب اسم العملة اللي تريد أراقبها (مثال: تون، بتكوين، ماستر...):</b>"
-    await update.message.reply_text(msg, parse_mode='HTML')
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=get_ad_keyboard())
     return ASK_CURRENCY
 
 async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,7 +184,7 @@ async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     curr_code = normalize_currency(curr_input)
     if not curr_code:
-        await update.message.reply_text("⚠️ عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح (مثال: تون):")
+        await update.message.reply_text("⚠️ عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح (مثال: تون):", reply_markup=get_ad_keyboard())
         return ASK_CURRENCY
     
     context.user_data['alert_curr'] = curr_code
@@ -187,7 +193,7 @@ async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ تم اختيار: <b>{curr_input}</b>\n\n"
         f"✍️ الآن ادخل السعر الذي تريد التنبيه عند وصول <b>{curr_input}</b> إليه (أرقام فقط):", 
-        parse_mode='HTML'
+        parse_mode='HTML', reply_markup=get_ad_keyboard()
     )
     return ASK_PRICE
 
@@ -198,7 +204,7 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     match = re.search(r'(\d+(?:\.\d+)?)', price_input)
     if not match:
-        await update.message.reply_text("⚠️ يرجى إدخال رقم صحيح:")
+        await update.message.reply_text("⚠️ يرجى إدخال رقم صحيح:", reply_markup=get_ad_keyboard())
         return ASK_PRICE
         
     target_price = float(match.group(1))
@@ -209,12 +215,11 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_price = get_current_price(curr_code)
     
     if current_price == 0:
-        await update.message.reply_text("⚠️ عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً.")
+        await update.message.reply_text("⚠️ عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً.", reply_markup=get_ad_keyboard())
         return ConversationHandler.END
         
-    # التعديل: فقط إذا كان نفس الرقم بالضبط يرفض، وإلا يشوفه صعود أو نزول
     if target_price == current_price:
-        await update.message.reply_text(f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر بالضبط! (السعر الحالي: {current_price:g}) 😅")
+        await update.message.reply_text(f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر بالضبط! (السعر الحالي: {current_price:g}) 😅", reply_markup=get_ad_keyboard())
         return ConversationHandler.END
         
     direction = 'up' if target_price > current_price else 'down'
@@ -237,7 +242,7 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>تم التفعيل!</b>\n"
         f"سيتم تنبيهك عند {dir_text} الـ {curr_name} إلى <code>{target_price:g}</code>\n\n"
         f"لإيقاف التنبيه ارسل /ايقاف\n"
-        f"لمعرفة تنبيهاتك الحالية ارسل /تنبيهاتي", parse_mode='HTML'
+        f"لمعرفة تنبيهاتك الحالية ارسل /تنبيهاتي", parse_mode='HTML', reply_markup=get_ad_keyboard()
     )
     return ConversationHandler.END
 
@@ -248,9 +253,9 @@ async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts_db = [a for a in alerts_db if a['user_id'] != user_id]
     
     if len(alerts_db) < initial_len:
-        await update.message.reply_text("🛑 تم إيقاف جميع تنبيهاتك بنجاح.")
+        await update.message.reply_text("🛑 تم إيقاف جميع تنبيهاتك بنجاح.", reply_markup=get_ad_keyboard())
     else:
-        await update.message.reply_text("⚠️ ليس لديك أي تنبيهات مفعلة.")
+        await update.message.reply_text("⚠️ ليس لديك أي تنبيهات مفعلة.", reply_markup=get_ad_keyboard())
     return ConversationHandler.END
 
 async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,7 +263,7 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_alerts = [a for a in alerts_db if a['user_id'] == user_id and a['active']]
     
     if not user_alerts:
-        await update.message.reply_text("🔕 لا توجد لديك أي تنبيهات مفعلة حالياً.\n\nلتفعيل تنبيه جديد ارسل: /نبهني")
+        await update.message.reply_text("🔕 لا توجد لديك أي تنبيهات مفعلة حالياً.\n\nلتفعيل تنبيه جديد ارسل: /نبهني", reply_markup=get_ad_keyboard())
         return
         
     msg = "🔔 <b>تنبيهاتك الحالية:</b>\n\n"
@@ -267,7 +272,7 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code> {dir_emoji}\n"
         
     msg += "\nلإيقاف جميع تنبيهاتك ارسل: /ايقاف"
-    await update.message.reply_text(msg, parse_mode='HTML')
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=get_ad_keyboard())
 
 async def check_alerts_loop(app: Application):
     global alerts_db 
@@ -287,7 +292,6 @@ async def check_alerts_loop(app: Application):
             if curr_price == 0: continue
             
             triggered = False
-            # التعديل: فحص الصعود والنزول
             if alert['direction'] == 'up' and curr_price >= alert['target']: triggered = True
             elif alert['direction'] == 'down' and curr_price <= alert['target']: triggered = True
                 
@@ -316,7 +320,7 @@ async def check_alerts_loop(app: Application):
                     msg += f"لإيقاف التنبيهات ارسل /ايقاف"
                     
                     try:
-                        await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                        await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML', reply_markup=get_ad_keyboard())
                     except Exception as e:
                         print(f"فشل إرسال التنبيه: {e}")
                         
@@ -340,7 +344,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(calc_match.group(1)); currency_str = calc_match.group(2)
         await update_prices_if_needed()
         reply = generate_conversion_msg(amount, currency_str)
-        await update.message.reply_text(reply, parse_mode='HTML')
+        await update.message.reply_text(reply, parse_mode='HTML', reply_markup=get_ad_keyboard())
         return
 
     allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol", "ماستر", "نجوم", "نجمة", "نج"]
@@ -352,7 +356,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_allowed:
         await update_prices_if_needed()
         reply = cached_msg if cached_msg else "⚠️ عذراً، حاول ثواني.."
-        await update.message.reply_text(reply, parse_mode='HTML')
+        await update.message.reply_text(reply, parse_mode='HTML', reply_markup=get_ad_keyboard())
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"⚠️ ظهر خطأ بالبوت: {context.error}")
@@ -391,7 +395,7 @@ def main():
     
     app.add_handler(alert_conv_handler)
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
-    app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) # التعديل هنا ضفنا أمر تنبيهاتي
+    app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_error_handler(error_handler)
     
