@@ -30,18 +30,20 @@ user_wallets = {} # تخزين محافظ المستخدمين {user_id: wallet_
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 # حالة سؤال المحفظة
 
-# --- دالة الإرسال الشاملة (تضيف الأزرار الملونة والإعلانات) ---
+# --- دالة الإرسال الشاملة (ترجع ID الرسالة حتى نكدر نعدلها بعدين) ---
 async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     inline_keyboard = []
     
-    # إضافة الأزرار الإضافية (مثل زر ربط المحفظة الأخضر) إذا كانت موجودة
     if extra_buttons:
         inline_keyboard.extend(extra_buttons)
         
-    # إضافة زر الإعلان الأحمر ثابتاً في النهاية
     inline_keyboard.append([
-        {"text": "سوالف المشاهير", "url": "https://t.me/+tYh0Y_qvfkpkYzli", "style": "danger"}
+        {
+            "text": "سوالف المشاهير", 
+            "url": "https://t.me/+tYh0Y_qvfkpkYzli", 
+            "style": "danger"
+        }
     ])
 
     payload = {
@@ -56,19 +58,49 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
         
     async with aiohttp.ClientSession() as session:
         try:
-            await session.post(url, json=payload, timeout=10)
+            async with session.post(url, json=payload, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # إرجاع آي دي الرسالة اللي اندزت
+                    return data.get("result", {}).get("message_id")
         except Exception as e:
             print(f"Error sending custom colored message: {e}")
+    return None
+
+# --- دالة تعديل الرسالة (لمنع السبام في الربط) ---
+async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
+    url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+    inline_keyboard = []
+    
+    if extra_buttons:
+        inline_keyboard.extend(extra_buttons)
+        
+    inline_keyboard.append([
+        {
+            "text": "سوالف المشاهير", 
+            "url": "https://t.me/+tYh0Y_qvfkpkYzli", 
+            "style": "danger"
+        }
+    ])
+
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "reply_markup": {"inline_keyboard": inline_keyboard}
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            await session.post(url, json=payload, timeout=10)
+        except Exception as e:
+            print(f"Error editing message: {e}")
 
 # --- API فحص المحفظة ---
 async def check_ton_wallet(address):
-    """
-    يفحص المحفظة عبر TonAPI. 
-    يرجع: (هل_المحفظة_صحيحة, رصيد_التون, رصيد_الدولار)
-    """
     try:
         async with aiohttp.ClientSession() as session:
-            # فحص صحة المحفظة وجلب رصيد TON
             url = f"https://tonapi.io/v2/accounts/{address}"
             async with session.get(url, timeout=5) as resp:
                 if resp.status != 200:
@@ -76,14 +108,12 @@ async def check_ton_wallet(address):
                 data = await resp.json()
                 ton_balance = data.get('balance', 0) / 1e9 
 
-            # جلب رصيد USDT
             usdt_url = f"https://tonapi.io/v2/accounts/{address}/jettons"
             usdt_balance = 0
             async with session.get(usdt_url, timeout=5) as resp:
                 if resp.status == 200:
                     j_data = await resp.json()
                     for b in j_data.get('balances', []):
-                        # البحث عن رمز USDT
                         if b['jetton']['symbol'] in ['USD₮', 'USDT']:
                             decimals = b['jetton']['decimals']
                             usdt_balance = float(b['balance']) / (10**decimals)
@@ -100,11 +130,15 @@ async def start_wallet_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     chat_id = update.message.chat_id
     
-    # إذا ضغط على رابط "ربط المحفظة"
     if 'link_wallet' in text:
         if user.id in user_wallets:
             msg = "لديك محفضه مربوطه بالفعل\nلتغيير محفضتك اضغط على الزر ادناه  :"
-            btn = [[{"text": "💼 ربط محفضتي 💼", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
+            btn = [[{
+                "text": "ربط محفضتي", 
+                "url": f"https://t.me/{context.bot.username}?start=change_wallet", 
+                "style": "success",
+                "icon_custom_emoji_id": "5409150983030728043"
+            }]]
             await send_custom_msg(chat_id, msg, extra_buttons=btn)
             return ConversationHandler.END
         else:
@@ -113,14 +147,12 @@ async def start_wallet_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_custom_msg(chat_id, msg)
             return ASK_WALLET
             
-    # إذا ضغط على رابط "تغيير المحفظة"
     elif 'change_wallet' in text:
         msg = (f"اهلا بك {user.first_name} <tg-emoji emoji-id=\"6048861163196783957\">👑</tg-emoji>\n\n"
                f"قم بارسال عنوان محفضتك \nاو الادرس الخاص بك لربط محفضتك <tg-emoji emoji-id=\"5319250406923051255\">✈️</tg-emoji>")
         await send_custom_msg(chat_id, msg)
         return ASK_WALLET
         
-    # إذا كان أمر /start عادي
     else:
         await send_custom_msg(chat_id, "أهلاً بك في بوت الصرافة والتنبيهات! استمتع بخدماتنا.")
         return ConversationHandler.END
@@ -130,28 +162,28 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
     
-    # 1. جاري البحث...
-    await send_custom_msg(chat_id, "يتم البحث عن محفضتك... <tg-emoji emoji-id=\"5411597774359653692\">🔍</tg-emoji>")
+    # 1. إرسال الرسالة الأولى وتخزين الـ ID مالتها
+    msg_id = await send_custom_msg(chat_id, "يتم البحث عن محفضتك... <tg-emoji emoji-id=\"5411597774359653692\">🔍</tg-emoji>")
     
-    # التأكد من صحة المحفظة عبر API
     is_valid, _, _ = await check_ton_wallet(address)
     
     if is_valid:
-        await asyncio.sleep(1) # تأخير بسيط للمؤثرات
-        await send_custom_msg(chat_id, "جاري ربط المحفضه بالبوت... <tg-emoji emoji-id=\"5215484787325676090\">⏳</tg-emoji>")
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
+        # 2. تعديل نفس الرسالة (لمنع السبام)
+        await edit_custom_msg(chat_id, msg_id, "جاري ربط المحفضه بالبوت... <tg-emoji emoji-id=\"5215484787325676090\">⏳</tg-emoji>")
+        await asyncio.sleep(1.5)
         
-        # حفظ المحفظة
         user_wallets[user_id] = address
-        await send_custom_msg(chat_id, "تم ربط محفضتك بنجاح  . <tg-emoji emoji-id=\"5215492745900077682\">✅</tg-emoji>")
+        # 3. تعديل نفس الرسالة للنجاح
+        await edit_custom_msg(chat_id, msg_id, "تم ربط محفضتك بنجاح  . <tg-emoji emoji-id=\"5215492745900077682\">✅</tg-emoji>")
     else:
-        await asyncio.sleep(1)
-        await send_custom_msg(chat_id, "عنوان المحفضه خطا ! <tg-emoji emoji-id=\"5215204871422093648\">❌</tg-emoji>")
+        await asyncio.sleep(1.5)
+        # تعديل نفس الرسالة للفشل
+        await edit_custom_msg(chat_id, msg_id, "عنوان المحفضه خطا ! <tg-emoji emoji-id=\"5215204871422093648\">❌</tg-emoji>")
         
     return ConversationHandler.END
 
 
-# (دوال الصرافة القديمة كما هي، لم أقم بتغييرها)
 def normalize_currency(curr_str):
     curr = curr_str.lower().strip()
     if curr in ['دولار', 'usdt', 'usd']: return 'USD'
@@ -289,7 +321,6 @@ def generate_conversion_msg(amount, currency_str):
     msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
     return msg
 
-# --- نظام التنبيهات ---
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "🔔 <b>نظام التنبيهات الذكي</b>\n\n"
     msg += "هذا الأمر يخلي البوت يراقب أسعار العملات بدالك، ومن يوصل السعر للرقم اللي تريده راح يسويلك منشن وينبهك فوراً!\n\n"
@@ -432,7 +463,6 @@ async def check_alerts_loop(app: Application):
                     curr_val = get_current_price(curr_code)
                     
                     msg = f"🚨 {mentions}\n\n"
-                    # إضافة ملصق التنبيه في النهاية كما طلبت
                     msg += f"🔥 <b>الحگ! الـ {curr_name} وصل للسعر المطلوب!</b> <tg-emoji emoji-id=\"5215372534060428125\">🔔</tg-emoji>\n"
                     msg += f"السعر الحالي: <b>{curr_val:g}</b>\n\n"
                     msg += f"لإيقاف التنبيهات ارسل /ايقاف"
@@ -444,12 +474,12 @@ async def check_alerts_loop(app: Application):
 async def post_init(app: Application):
     asyncio.create_task(check_alerts_loop(app))
 
-# --- معالجة الرسائل العادية (رصيدي وغيرها) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     text = update.message.text.strip().lower()
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
+    msg_id = update.message.message_id # نحفظ الآي دي لرسالة المستخدم
     
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word in text for word in forbidden): return
@@ -458,8 +488,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["رصيدي", "/رصيدي", "رص", "/رص"]:
         if user_id not in user_wallets:
             msg = "لم تقم بربط محفضتك بالبوت <tg-emoji emoji-id=\"5213195952008997792\">⚠️</tg-emoji>"
-            btn = [[{"text": "💼 ربط محفضتي 💼", "url": f"https://t.me/{context.bot.username}?start=link_wallet", "style": "success"}]]
-            await send_custom_msg(chat_id, msg, extra_buttons=btn)
+            btn = [[{
+                "text": "ربط محفضتي", 
+                "url": f"https://t.me/{context.bot.username}?start=link_wallet", 
+                "style": "success",
+                "icon_custom_emoji_id": "5409150983030728043"
+            }]]
+            await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, extra_buttons=btn)
         else:
             address = user_wallets[user_id]
             is_valid, ton_bal, usdt_bal = await check_ton_wallet(address)
@@ -468,26 +503,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg = (f"الان لديك  :\n"
                        f"TON <tg-emoji emoji-id=\"5321330914851040564\">💎</tg-emoji>: {ton_bal:.2f}\n"
                        f"USDT <tg-emoji emoji-id=\"5213170203680060059\">💵</tg-emoji>: {usdt_bal:.2f}")
-                await send_custom_msg(chat_id, msg)
+                await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
             else:
-                await send_custom_msg(chat_id, "⚠️ عذراً، يبدو أن هناك مشكلة في محفظتك المربوطة. قم بتغييرها.")
+                await send_custom_msg(chat_id, "⚠️ عذراً، يبدو أن هناك مشكلة في محفظتك المربوطة. قم بتغييرها.", reply_to_message_id=msg_id)
         return
         
-    # --- ميزة: تغيير محفظتي ---
-    if text in ["تغيير محفظتي", "/تغيير محفظتي"]:
+    # --- ميزة: تغيير محفظتي (الرد المباشر) ---
+    if text in ["تغيير محفظتي", "/تغيير محفظتي", "تغيير محفضتي", "/تغيير محفضتي"]:
         msg = "اضغط على الزر أدناه لتغيير محفظتك المربوطة:"
-        btn = [[{"text": "💼 ربط محفضتي 💼", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
-        await send_custom_msg(chat_id, msg, extra_buttons=btn)
+        btn = [[{
+            "text": "ربط محفضتي", 
+            "url": f"https://t.me/{context.bot.username}?start=change_wallet", 
+            "style": "success",
+            "icon_custom_emoji_id": "5409150983030728043"
+        }]]
+        # هنا ضفنا الـ reply_to_message_id حتى يرد على رسالة المستخدم
+        await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
-    # --- حاسبة الصرافة ---
     calc_pattern = r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|بتكوين|بيتكوين|btc|bitcoin|ايثيريوم|إيثيريوم|eth|ethereum|سولانا|sol|solana|نجمه|نجمة|نجوم|star|stars|نج)'
     calc_match = re.search(calc_pattern, text)
     if calc_match:
         amount = float(calc_match.group(1)); currency_str = calc_match.group(2)
         await update_prices_if_needed()
         reply = generate_conversion_msg(amount, currency_str)
-        await send_custom_msg(chat_id, reply, update.message.message_id)
+        await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
         return
 
     allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "ايثيريوم", "سولانا", "btc", "ton", "sol", "ماستر", "نجوم", "نجمة", "نج"]
@@ -499,7 +539,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_allowed:
         await update_prices_if_needed()
         reply = cached_msg if cached_msg else "⚠️ عذراً، حاول ثواني.."
-        await send_custom_msg(chat_id, reply, update.message.message_id)
+        await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"⚠️ ظهر خطأ بالبوت: {context.error}")
@@ -525,7 +565,6 @@ def main():
         .build()
     )
     
-    # محادثة التنبيهات
     alert_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^/?نبهني$'), alert_start)],
         states={
@@ -537,7 +576,6 @@ def main():
         per_user=True
     )
     
-    # محادثة المحفظة
     wallet_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", start_wallet_flow)
@@ -550,7 +588,7 @@ def main():
     )
     
     app.add_handler(alert_conv_handler)
-    app.add_handler(wallet_conv_handler) # تسجيل محادثة المحفظة
+    app.add_handler(wallet_conv_handler)
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
