@@ -40,8 +40,8 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
         
     inline_keyboard.append([
         {
-            "text": "سوالف المشاهير", 
-            "url": "https://t.me/+tYh0Y_qvfkpkYzli", 
+            "text": "اخبار الفلوس", 
+            "url": "https://t.me/Guidance_nft", 
             "style": "danger"
         }
     ])
