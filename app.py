@@ -6,8 +6,8 @@ import threading
 import asyncio
 import re
 from flask import Flask
-from telegram import Update
-from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.request import HTTPXRequest
 
 # إعدادات اللوج
@@ -16,9 +16,9 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TOKEN = '8679057078:AAH27klAkXPLu9bWVr-_jhmg06gdYvefVps'
 
 # --- نظام الإدارة والمستخدمين ---
-ADMINS = {7126816492, 1955081272} # آيديات المالكين الافتراضية
+ADMINS = {7126816492, 1955081272} # آيديات المالكين
 BANNED_USERS = set()
-FORCE_SUB_CHANNEL = None # سيتم تغييره عبر الأوامر (مثال: @YourChannel)
+FORCE_SUB_CHANNEL = None # سيتم تغييره من لوحة الإدارة
 total_users = set() 
 
 # نظام الكاش والبيانات
@@ -30,9 +30,10 @@ crypto_prices = {'BTC': 0, 'TON': 0, 'ETH': 0, 'SOL': 0}
 alerts_db = []
 user_wallets = {} 
 
-# حالات المحادثة للتنبيهات والمحفظة
+# حالات المحادثة
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
+WAIT_BROADCAST, WAIT_BAN, WAIT_UNBAN, WAIT_FORCE_SUB = range(4, 8) # حالات لوحة الإدارة
 
 # --- دوال الإشعارات والتحقق ---
 async def notify_admins(context, text):
@@ -44,10 +45,9 @@ async def notify_admins(context, text):
             pass
 
 async def check_new_user(user, context, is_calc=False):
-    """التحقق من المستخدم الجديد وإرسال إشعار للمالكين"""
+    """التحقق من المستخدم الجديد"""
     if user.id not in total_users:
-        # إذا كان الأمر مجرد "صرف" لا نحسبه دخول رسمي للبوت
-        if is_calc: return 
+        if is_calc: return # إذا كتب "صرف" لا نحسبه كدخول رسمي
         
         total_users.add(user.id)
         msg = (f"👤 <b>دخل شخص جديد!</b>\n"
@@ -72,9 +72,9 @@ async def is_force_sub_ok(update, context):
             return False
         return True
     except Exception:
-        return True # إذا لم يكن البوت مشرفاً، نسمح بالمرور
+        return True 
 
-# --- دوال الإرسال الشاملة المحدثة ---
+# --- دوال الإرسال السريعة ---
 async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None, bot_username=None, show_group_btn=False):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     inline_keyboard = []
@@ -82,13 +82,13 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
     if extra_buttons:
         inline_keyboard.extend(extra_buttons)
         
-    # زر أخبار الفلوس مع ملصقين باستخدام HTML داخل النص والرابط الجديد
+    # تم التعديل: ملصق واحد ونَص نظيف لحل مشكلة الزر
     inline_keyboard.append([
         {
-            "text": "<tg-emoji emoji-id=\"5224257782013769471\">💵</tg-emoji> اخبار الفلوس <tg-emoji emoji-id=\"5224257782013769471\">💵</tg-emoji>", 
+            "text": "اخبار الفلوس", 
             "url": "https://t.me/Guidance_nft", 
             "style": "danger",
-            "icon_custom_emoji_id": "5224257782013769471" # للضمان في النسخ القديمة
+            "icon_custom_emoji_id": "5224257782013769471"
         }
     ])
     
@@ -117,8 +117,7 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("result", {}).get("message_id")
-        except Exception as e:
-            print(f"Error sending custom colored message: {e}")
+        except Exception: pass
     return None
 
 async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
@@ -130,7 +129,7 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
         
     inline_keyboard.append([
         {
-            "text": "<tg-emoji emoji-id=\"5224257782013769471\">💵</tg-emoji> اخبار الفلوس <tg-emoji emoji-id=\"5224257782013769471\">💵</tg-emoji>", 
+            "text": "اخبار الفلوس", 
             "url": "https://t.me/Guidance_nft", 
             "style": "danger",
             "icon_custom_emoji_id": "5224257782013769471"
@@ -146,9 +145,97 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
     }
     
     async with aiohttp.ClientSession() as session:
-        try:
-            await session.post(url, json=payload, timeout=10)
+        try: await session.post(url, json=payload, timeout=10)
         except Exception: pass
+
+# --- لوحة تحكم الإدارة (Admin Panel) ---
+async def send_admin_panel(update: Update):
+    keyboard = [
+        [InlineKeyboardButton("📢 إذاعة", callback_data='admin_broadcast'), InlineKeyboardButton("🔔 اشتراك إجباري", callback_data='admin_forcesub')],
+        [InlineKeyboardButton("🚫 حظر شخص", callback_data='admin_ban'), InlineKeyboardButton("✅ فك حظر", callback_data='admin_unban')],
+        [InlineKeyboardButton("📊 إحصائيات", callback_data='admin_stats'), InlineKeyboardButton("❌ إغلاق", callback_data='admin_close')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("👑 <b>لوحة تحكم المالكين</b>\nاختر الإجراء المطلوب من الأزرار أدناه:", reply_markup=reply_markup, parse_mode='HTML')
+
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    if user_id not in ADMINS:
+        await query.answer("⚠️ هذه الأزرار مخصصة للمالكين فقط!", show_alert=True)
+        return ConversationHandler.END
+        
+    await query.answer()
+    data = query.data
+
+    if data == 'admin_broadcast':
+        await query.edit_message_text("📢 أرسل الآن الرسالة التي تريد إذاعتها لجميع المستخدمين (يمكنك إرسال نص أو إرسال /الغاء للتراجع):")
+        return WAIT_BROADCAST
+    elif data == 'admin_ban':
+        await query.edit_message_text("🚫 أرسل الآن آيدي (ID) الشخص الذي تريد حظره:")
+        return WAIT_BAN
+    elif data == 'admin_unban':
+        await query.edit_message_text("✅ أرسل الآن آيدي (ID) الشخص لفك الحظر عنه:")
+        return WAIT_UNBAN
+    elif data == 'admin_forcesub':
+        await query.edit_message_text("🔔 أرسل معرف القناة للاشتراك الإجباري (مثال: @YourChannel)\nلإيقاف الاشتراك الإجباري أرسل كلمة: ايقاف")
+        return WAIT_FORCE_SUB
+    elif data == 'admin_stats':
+        global FORCE_SUB_CHANNEL
+        sub_status = FORCE_SUB_CHANNEL if FORCE_SUB_CHANNEL else "معطل"
+        stats = f"📊 <b>إحصائيات البوت:</b>\n\n👥 عدد المستخدمين الكلي: <b>{len(total_users)}</b>\n🚫 المحظورين: <b>{len(BANNED_USERS)}</b>\n📢 الاشتراك الإجباري: <b>{sub_status}</b>\n💎 تنبيهات مفعلة: <b>{len([a for a in alerts_db if a['active']])}</b>"
+        await query.edit_message_text(stats, parse_mode='HTML')
+        return ConversationHandler.END
+    elif data == 'admin_close':
+        await query.edit_message_text("تم إغلاق لوحة التحكم.")
+        return ConversationHandler.END
+
+# دوال معالجة إدخالات الأدمن
+async def admin_do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text
+    if msg == '/الغاء':
+        await update.message.reply_text("تم الإلغاء.")
+        return ConversationHandler.END
+    await update.message.reply_text(f"⏳ جاري الإذاعة لـ {len(total_users)} مستخدم...")
+    count = 0
+    for uid in total_users.copy():
+        try:
+            await send_custom_msg(uid, f"📢 <b>رسالة إدارية:</b>\n\n{msg}")
+            count += 1
+            await asyncio.sleep(0.05) # لمنع حظر البوت بسبب السرعة
+        except Exception: pass
+    await update.message.reply_text(f"✅ تمت الإذاعة بنجاح لـ {count} مستخدم.")
+    return ConversationHandler.END
+
+async def admin_do_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try: target = int(update.message.text.strip())
+    except ValueError: 
+        await update.message.reply_text("آيدي غير صالح، تم الإلغاء.")
+        return ConversationHandler.END
+    BANNED_USERS.add(target)
+    await update.message.reply_text(f"✅ تم حظر المستخدم {target} بنجاح.")
+    return ConversationHandler.END
+
+async def admin_do_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try: target = int(update.message.text.strip())
+    except ValueError: 
+        await update.message.reply_text("آيدي غير صالح، تم الإلغاء.")
+        return ConversationHandler.END
+    if target in BANNED_USERS: BANNED_USERS.remove(target)
+    await update.message.reply_text(f"✅ تم فك حظر المستخدم {target} بنجاح.")
+    return ConversationHandler.END
+
+async def admin_do_force_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global FORCE_SUB_CHANNEL
+    msg = update.message.text.strip()
+    if msg == 'ايقاف':
+        FORCE_SUB_CHANNEL = None
+        await update.message.reply_text("✅ تم إيقاف الاشتراك الإجباري بنجاح.")
+    else:
+        if not msg.startswith('@'): msg = '@' + msg
+        FORCE_SUB_CHANNEL = msg
+        await update.message.reply_text(f"✅ تم تفعيل الاشتراك الإجباري للقناة: {FORCE_SUB_CHANNEL}")
+    return ConversationHandler.END
 
 # --- API فحص المحفظة ---
 async def check_ton_wallet(address):
@@ -173,16 +260,35 @@ async def check_ton_wallet(address):
             return True, ton_balance, usdt_balance
     except Exception: return False, 0, 0
 
-# --- نظام ربط المحفظة ---
-async def start_wallet_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- نظام البداية وربط المحفظة ---
+async def start_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user = update.message.from_user
     chat_id = update.message.chat_id
     
     if user.id in BANNED_USERS: return ConversationHandler.END
     if not await is_force_sub_ok(update, context): return ConversationHandler.END
-    await check_new_user(user, context)
     
+    # رسالة البداية العادية + لوحة الأدمن إذا كان مالك
+    if text == '/start':
+        await check_new_user(user, context)
+        if update.message.chat.type == "private":
+            msg = (f"أهلاً بك يا <b>{user.first_name}</b> في بوت الصرافة المتقدم 🤖💰\n\n"
+                   "<b>الخدمات التي يقدمها البوت:</b>\n"
+                   "• حساب أسعار العملات الرقمية والمحلية.\n"
+                   "• ربط محفظة TON وعرض رصيدك بداخلها.\n"
+                   "• نظام تنبيهات ذكي للأسعار يصلك كإشعار.\n\n"
+                   "⚠️ <b>أرسل كلمة (الاوامر) او (اوامر) لعرض الشرح الكامل.</b>")
+            await send_custom_msg(chat_id, msg, bot_username=context.bot.username, show_group_btn=True)
+            # إرسال لوحة الإدارة للمالكين
+            if user.id in ADMINS:
+                await send_admin_panel(update)
+        else:
+            await send_custom_msg(chat_id, "أهلاً بك! اكتب `اوامر` لعرض الشرح.", bot_username=context.bot.username, show_group_btn=True)
+        return ConversationHandler.END
+
+    # معالجة أوامر المحفظة
+    await check_new_user(user, context)
     if 'link_wallet' in text:
         if user.id in user_wallets:
             msg = "لديك محفضه مربوطه بالفعل\nلتغيير محفضتك اضغط على الزر ادناه  :"
@@ -200,19 +306,6 @@ async def start_wallet_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"قم بارسال عنوان محفضتك \nاو الادرس الخاص بك لربط محفضتك <tg-emoji emoji-id=\"5319250406923051255\">✈️</tg-emoji>")
         await send_custom_msg(chat_id, msg)
         return ASK_WALLET
-        
-    else:
-        if update.message.chat.type == "private":
-            msg = (f"أهلاً بك يا <b>{user.first_name}</b> في بوت الصرافة المتقدم 🤖💰\n\n"
-                   "<b>الخدمات التي يقدمها البوت:</b>\n"
-                   "• حساب أسعار العملات الرقمية والمحلية.\n"
-                   "• ربط محفظة TON وعرض رصيدك بداخلها.\n"
-                   "• نظام تنبيهات ذكي للأسعار يصلك كإشعار.\n\n"
-                   "⚠️ <b>أرسل كلمة (الاوامر) او (اوامر) لعرض الشرح الكامل.</b>")
-            await send_custom_msg(chat_id, msg, bot_username=context.bot.username, show_group_btn=True)
-        else:
-            await send_custom_msg(chat_id, "أهلاً بك! اكتب `اوامر` لعرض الشرح.", bot_username=context.bot.username, show_group_btn=True)
-        return ConversationHandler.END
 
 async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     address = update.message.text.strip()
@@ -223,36 +316,18 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
     is_valid, _, _ = await check_ton_wallet(address)
     
     if is_valid:
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1)
         await edit_custom_msg(chat_id, msg_id, "جاري ربط المحفضه بالبوت... <tg-emoji emoji-id=\"5215484787325676090\">⏳</tg-emoji>")
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1)
         user_wallets[user_id] = address
         await edit_custom_msg(chat_id, msg_id, "تم ربط محفضتك بنجاح  . <tg-emoji emoji-id=\"5215492745900077682\">✅</tg-emoji>")
     else:
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1)
         await edit_custom_msg(chat_id, msg_id, "عنوان المحفضه خطا ! <tg-emoji emoji-id=\"5215204871422093648\">❌</tg-emoji>")
         
     return ConversationHandler.END
 
-# --- دوال الصرافة وجلب الأسعار ---
-def normalize_currency(curr_str):
-    curr = curr_str.lower().strip()
-    if curr in ['دولار', 'usdt', 'usd']: return 'USD'
-    elif curr == 'ماستر': return 'IQD'
-    elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: return 'STARS'
-    elif curr in ['تون', 'ton']: return 'TON'
-    elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: return 'BTC'
-    elif curr in ['ايثيريوم', 'إيثيريوم', 'eth', 'ethereum']: return 'ETH'
-    elif curr in ['سولانا', 'sol', 'solana']: return 'SOL'
-    return None
-
-def get_current_price(curr_code):
-    if curr_code == 'USD': return 1.0
-    elif curr_code == 'IQD': return last_known_iqd
-    elif curr_code == 'STARS': return 0.015
-    elif curr_code in crypto_prices: return crypto_prices[curr_code]
-    return 0
-
+# --- دوال الصرافة السريعة ---
 async def fetch_mastercard_price(session):
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
@@ -305,9 +380,7 @@ async def update_prices_if_needed():
     except Exception: return False
 
 def generate_conversion_msg(amount, currency_str):
-    curr = currency_str.lower()
-    show_usd = True; show_iqd = True
-
+    curr = currency_str.lower().strip()
     if curr in ['دولار', 'usdt', 'usd']: base = 'USD'; name = "دولار (USDT)"; usd_val = amount; show_usd = False  
     elif curr == 'ماستر': base = 'IQD'; name = "ماستر"; actual_iqd = amount * 1000 if amount < 100000 else amount; usd_val = actual_iqd / (last_known_iqd / 100); show_iqd = False  
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: base = 'STARS'; name = '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم'; usd_val = amount * 0.015 
@@ -442,7 +515,7 @@ async def check_alerts_loop(app: Application):
 async def post_init(app: Application):
     asyncio.create_task(check_alerts_loop(app))
 
-# --- إضافة الكروب والإشعارات للمطور ---
+# --- معالجة إضافة المجموعة والأوامر الرئيسية ---
 async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
@@ -454,7 +527,17 @@ async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE
             await notify_admins(context, admin_msg)
             await send_custom_msg(chat.id, "تم تشغيل البوت اكتب الاوامر او اوامر لعرض الشرح")
 
-# --- معالجة الرسائل والأوامر الرئيسية ---
+def normalize_currency_msg(curr_str):
+    curr = curr_str.lower().strip()
+    if curr in ['دولار', 'usdt', 'usd']: return 'USD'
+    elif curr == 'ماستر': return 'IQD'
+    elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: return 'STARS'
+    elif curr in ['تون', 'ton']: return 'TON'
+    elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: return 'BTC'
+    elif curr in ['ايثيريوم', 'إيثيريوم', 'eth', 'ethereum']: return 'ETH'
+    elif curr in ['سولانا', 'sol', 'solana']: return 'SOL'
+    return None
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     text = update.message.text.strip()
@@ -463,44 +546,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     msg_id = update.message.message_id 
 
-    # أوامر الإدارة الخاصة بالمالك
-    if text.startswith('/اذاعه ') and user_id in ADMINS:
-        b_msg = text.replace('/اذاعه ', '')
-        count = 0
-        await update.message.reply_text(f"جاري الإذاعة لـ {len(total_users)} مستخدم...")
-        for uid in total_users.copy():
-            try:
-                await send_custom_msg(uid, f"📢 <b>رسالة إدارية:</b>\n\n{b_msg}")
-                count += 1
-            except Exception: pass
-        await update.message.reply_text(f"✅ تمت الإذاعة بنجاح لـ {count} مستخدم.")
-        return
-    
-    if text.startswith('/حظر ') and user_id in ADMINS:
-        target = int(text.replace('/حظر ', '').strip())
-        BANNED_USERS.add(target)
-        await update.message.reply_text(f"✅ تم حظر المستخدم {target} بنجاح.")
-        return
-        
-    if text.startswith('/فك_حظر ') and user_id in ADMINS:
-        target = int(text.replace('/فك_حظر ', '').strip())
-        if target in BANNED_USERS: BANNED_USERS.remove(target)
-        await update.message.reply_text(f"✅ تم فك حظر المستخدم {target} بنجاح.")
-        return
-        
-    if text.startswith('/اشتراك ') and user_id in ADMINS:
-        global FORCE_SUB_CHANNEL
-        FORCE_SUB_CHANNEL = text.replace('/اشتراك ', '').strip()
-        await update.message.reply_text(f"✅ تم تفعيل الاشتراك الإجباري للقناة: {FORCE_SUB_CHANNEL}")
-        return
-
-    # الانضمام للمالكين بالكود السري
+    # الانضمام للمالكين وعرض الكود السري
     if text == "/join 91om20ar":
         ADMINS.add(user_id)
         await update.message.reply_text("✅ تم إضافتك لقائمة المالكين! ستتلقى الإشعارات من الآن.")
         return
 
-    # عرض الكود
     if text == "عرض الكود":
         if user_id in ADMINS:
             if update.message.chat.type == "private":
@@ -521,16 +572,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word == text_lower for word in forbidden): return
 
-    # الأوامر
+    # الأوامر الرئيسية (تم التعديل لتطابق المطلوب بالضبط)
     if text_lower in ["اوامر", "/اوامر", "الاوامر"]:
         await check_new_user(update.message.from_user, context)
         msg = (
             "اهلا بك في قائمه اوامر البوت <tg-emoji emoji-id=\"5800769433974611462\">📋</tg-emoji>\n\n"
-            "1️⃣ صرف [رقم] [عملة] <tg-emoji emoji-id=\"5319250406923051255\">✈️</tg-emoji>: لحساب قيمة العملات بشكل مباشر <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n\n"
-            "<tg-emoji emoji-id=\"5411585799990830248\">2️⃣</tg-emoji> نبهني <tg-emoji emoji-id=\"5215372534060428125\">🔔</tg-emoji>: لمراقبة سعر عملة معينة وتنبيهك عند وصولها للهدف <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n\n"
-            "<tg-emoji emoji-id=\"5409189019261103031\">3️⃣</tg-emoji> تنبيهاتي <tg-emoji emoji-id=\"5411597774359653692\">🔍</tg-emoji>: لعرض وإدارة التنبيهات المفعلة الخاصة بك <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n\n"
-            "<tg-emoji emoji-id=\"5411500398861118321\">4️⃣</tg-emoji> رصيدي <tg-emoji emoji-id=\"5409150983030728043\">💼</tg-emoji>: لمعرفة رصيدك (TON و USDT) في المحفظة المربوطة <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n\n"
-            "<tg-emoji emoji-id=\"5409338071806146386\">5️⃣</tg-emoji> تغيير محفظتي <tg-emoji emoji-id=\"5215484787325676090\">⏳</tg-emoji>: لربط أو تغيير محفظة TON الخاصة بك <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n"
+            "1️⃣ صرف [رقم] [عملة]: لحساب قيمة العملات بشكل مباشر <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n\n"
+            "<tg-emoji emoji-id=\"5411585799990830248\">2️⃣</tg-emoji> نبهني: لمراقبة سعر عملة معينة وتنبيهك عند وصولها للهدف <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n\n"
+            "<tg-emoji emoji-id=\"5409189019261103031\">3️⃣</tg-emoji> تنبيهاتي: لعرض وإدارة التنبيهات المفعلة الخاصة بك <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n\n"
+            "<tg-emoji emoji-id=\"5411500398861118321\">4️⃣</tg-emoji> رصيدي: لمعرفة رصيدك (TON و USDT) في المحفظة المربوطة <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n\n"
+            "<tg-emoji emoji-id=\"5409338071806146386\">5️⃣</tg-emoji> تغيير محفظتي: لربط أو تغيير محفظة TON الخاصة بك <tg-emoji emoji-id=\"5210956306952758910\">✔️</tg-emoji><tg-emoji emoji-id=\"5958605483488055761\">✨</tg-emoji>\n"
         )
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
@@ -543,7 +594,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, bot_username=context.bot.username, show_group_btn=True)
         return
 
-    # رصيدي
+    # رصيدي وتغيير محفظتي
     if text_lower in ["رصيدي", "/رصيدي", "رص", "/رص"]:
         await check_new_user(update.message.from_user, context)
         if user_id not in user_wallets:
@@ -561,7 +612,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: await send_custom_msg(chat_id, "⚠️ عذراً، يبدو أن هناك مشكلة في محفظتك المربوطة. قم بتغييرها.", reply_to_message_id=msg_id)
         return
         
-    # تغيير محفظتي
     if text_lower in ["تغيير محفظتي", "/تغيير محفظتي", "تغيير محفضتي", "/تغيير محفضتي"]:
         await check_new_user(update.message.from_user, context)
         msg = "اضغط على الزر أدناه لتغيير محفظتك المربوطة:"
@@ -569,7 +619,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
-    # حاسبة الصرافة (مع إرسال is_calc=True لمنع تسجيله كعضو جديد إلا إذا دخل للبوت)
+    # حاسبة الصرافة (ترسل إشارة is_calc=True لمنع تسجيله كعضو فعال فورا)
     calc_pattern = r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|بتكوين|بيتكوين|btc|bitcoin|ايثيريوم|إيثيريوم|eth|ethereum|سولانا|sol|solana|نجمه|نجمة|نجوم|star|stars|نج)'
     calc_match = re.search(calc_pattern, text_lower)
     if calc_match:
@@ -616,6 +666,21 @@ def main():
         .build()
     )
     
+    # لوحة الإدارة
+    admin_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback_handler, pattern='^admin_')],
+        states={
+            WAIT_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_do_broadcast)],
+            WAIT_BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_do_ban)],
+            WAIT_UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_do_unban)],
+            WAIT_FORCE_SUB: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_do_force_sub)]
+        },
+        fallbacks=[],
+        per_chat=True,
+        per_user=True
+    )
+    
+    # التنبيهات
     alert_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^/?نبهني$'), alert_start)],
         states={
@@ -627,13 +692,15 @@ def main():
         per_user=True
     )
     
+    # المحفظة والستارت
     wallet_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start_wallet_flow)],
+        entry_points=[CommandHandler("start", start_flow)],
         states={ASK_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_wallet_address)]},
         fallbacks=[],
         map_to_parent=None
     )
     
+    app.add_handler(admin_conv_handler)
     app.add_handler(alert_conv_handler)
     app.add_handler(wallet_conv_handler)
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members)) 
