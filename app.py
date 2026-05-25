@@ -74,7 +74,7 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
         
     inline_keyboard.append([
         {
-            "text": "(5224257782013769471) اخبار الفلوس (5224257782013769471)", 
+            "text": '<tg-emoji emoji-id="5224257782013769471">💸</tg-emoji> اخبار الفلوس <tg-emoji emoji-id="5224257782013769471">💸</tg-emoji>', 
             "url": "https://t.me/Guidance_nft", 
             "style": "danger"
         }
@@ -109,7 +109,7 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
         
     inline_keyboard.append([
         {
-            "text": "(5224257782013769471) اخبار الفلوس (5224257782013769471)", 
+            "text": '<tg-emoji emoji-id="5224257782013769471">💸</tg-emoji> اخبار الفلوس <tg-emoji emoji-id="5224257782013769471">💸</tg-emoji>', 
             "url": "https://t.me/Guidance_nft", 
             "style": "danger"
         }
