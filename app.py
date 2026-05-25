@@ -16,14 +16,12 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TOKEN = '8679057078:AAH27klAkXPLu9bWVr-_jhmg06gdYvefVps'
 
 # --- نظام الإدارة والمستخدمين ---
-ADMINS = {7126816492, 1955081272} # آيديات المالكين
+ADMINS = {7126816492, 1955081272}
 BANNED_USERS = set()
-FORCE_SUB_CHANNEL = None # سيتم تغييره من لوحة الإدارة
+FORCE_SUB_CHANNEL = None 
 total_users = set() 
 
-# نظام الكاش والبيانات (الكود الأولي السريع)
-CACHE_TIME = 5
-last_fetch_time = 0
+# نظام الكاش والبيانات
 cached_msg = ""
 last_known_iqd = 153000
 crypto_prices = {'BTC': 0, 'TON': 0, 'ETH': 0, 'SOL': 0}
@@ -51,7 +49,7 @@ async def check_new_user(user, context, is_calc=False):
                f"عدد المستخدمين الان: {len(total_users)}")
         await notify_admins(context, msg)
 
-# التعديل: يستقبل آي دي الرسالة حتى يرد عليها، وما يشتغل إلا بالأوامر
+# التعديل: فحص الاشتراك الإجباري والرد على المستخدم مباشرة
 async def is_force_sub_ok(update, context, reply_to_id=None):
     global FORCE_SUB_CHANNEL
     if not FORCE_SUB_CHANNEL: return True
@@ -61,26 +59,27 @@ async def is_force_sub_ok(update, context, reply_to_id=None):
     try:
         member = await context.bot.get_chat_member(chat_id=FORCE_SUB_CHANNEL, user_id=user_id)
         if member.status in ['left', 'kicked']:
-            msg = f"⚠️ <b>عذراً، يجب عليك الاشتراك في القناة أولاً لتتمكن من استخدام البوت.</b>"
+            msg = f"⚠️ <b>عذراً، يجب عليك الاشتراك في قناة البوت أولاً لتتمكن من استخدام أوامره.</b>"
             btn = [[{"text": "📢 اشترك في القناة", "url": f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}", "style": "primary"}]]
-            # التعديل: البوت يرد على رسالة المستخدم
+            # الرد المباشر على رسالة المستخدم
             await send_custom_msg(update.message.chat_id, msg, reply_to_message_id=reply_to_id, extra_buttons=btn)
             return False
         return True
     except Exception: return True 
 
-# --- دوال الإرسال السريعة ---
+# --- دوال الإرسال السريعة والمضمونة ---
 async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None, bot_username=None, show_group_btn=False):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     inline_keyboard = []
+    
     if extra_buttons: inline_keyboard.extend(extra_buttons)
         
+    # تصليح زر اخبار الفلوس: ملصق عادي لتجنب أخطاء تليجرام مع الروابط
     inline_keyboard.append([
         {
-            "text": "اخبار الفلوس", 
+            "text": "💵 اخبار الفلوس", 
             "url": "https://t.me/Guidance_nft", 
-            "style": "danger",
-            "icon_custom_emoji_id": "5224257782013769471"
+            "style": "danger"
         }
     ])
     
@@ -108,10 +107,9 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
         
     inline_keyboard.append([
         {
-            "text": "اخبار الفلوس", 
+            "text": "💵 اخبار الفلوس", 
             "url": "https://t.me/Guidance_nft", 
-            "style": "danger",
-            "icon_custom_emoji_id": "5224257782013769471"
+            "style": "danger"
         }
     ])
 
@@ -252,71 +250,63 @@ async def check_ton_wallet(address):
             return True, ton_balance, usdt_balance
     except Exception: return False, 0, 0
 
-# --- نظام جلب الأسعار المباشر (الأصلي) لسرعة 3 تون ---
+# --- نظام تحديث الأسعار الصاروخي بالخلفية ---
 async def fetch_mastercard_price(session):
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-        headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+        headers = {"Content-Type": "application/json"}
         payload = {"fiat": "IQD", "page": 1, "rows": 1, "tradeType": "BUY", "asset": "USDT", "countries": [], "payTypes": [], "publisherType": None, "merchantCheck": False}
         async with session.post(url, json=payload, headers=headers, timeout=5) as response:
             if response.status == 200:
                 data = await response.json()
-                if data.get('data') and len(data['data']) > 0:
-                    price = data['data'][0]['adv']['price']
-                    return str(int(float(price) * 100))
-    except Exception:
-        pass
+                if data.get('data') and len(data['data']) > 0: return str(int(float(data['data'][0]['adv']['price']) * 100))
+    except Exception: pass
     return None
 
-async def update_prices_if_needed():
-    global last_fetch_time, cached_msg, last_known_iqd, crypto_prices
-    current_time = time.time()
-    
-    if current_time - last_fetch_time < CACHE_TIME and cached_msg:
-        return True
-        
-    try:
-        async with aiohttp.ClientSession() as session:
-            crypto_url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT","SOLUSDT","TONUSDT"]'
-            crypto_task = session.get(crypto_url, timeout=10)
-            master_task = fetch_mastercard_price(session)
-            
-            response, master_price_str = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
-            
-            if not isinstance(response, Exception) and response.status == 200:
-                crypto_data = await response.json()
-                prices = {item['symbol']: float(item['price']) for item in crypto_data}
-                crypto_prices['BTC'] = prices.get('BTCUSDT', 0)
-                crypto_prices['TON'] = prices.get('TONUSDT', 0)
-                crypto_prices['ETH'] = prices.get('ETHUSDT', 0)
-                crypto_prices['SOL'] = prices.get('SOLUSDT', 0)
+async def background_price_updater():
+    """هذه الدالة تعمل بالخلفية لضمان استجابة البوت في جزء من الثانية"""
+    global cached_msg, last_known_iqd, crypto_prices, last_fetch_time
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                crypto_url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT","SOLUSDT","TONUSDT"]'
+                crypto_task = session.get(crypto_url, timeout=10)
+                master_task = fetch_mastercard_price(session)
+                response, master_price_str = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
+                
+                if not isinstance(response, Exception) and response.status == 200:
+                    crypto_data = await response.json()
+                    prices = {item['symbol']: float(item['price']) for item in crypto_data}
+                    crypto_prices['BTC'] = prices.get('BTCUSDT', crypto_prices['BTC'])
+                    crypto_prices['TON'] = prices.get('TONUSDT', crypto_prices['TON'])
+                    crypto_prices['ETH'] = prices.get('ETHUSDT', crypto_prices['ETH'])
+                    crypto_prices['SOL'] = prices.get('SOLUSDT', crypto_prices['SOL'])
 
-            if isinstance(master_price_str, str) and master_price_str.isdigit():
-                last_known_iqd = int(master_price_str)
+                if isinstance(master_price_str, str) and master_price_str.isdigit(): last_known_iqd = int(master_price_str)
 
-            btc_int = int(crypto_prices['BTC'])
-            ton_val = crypto_prices['TON']
-            eth_int = int(crypto_prices['ETH'])
-            sol_val = crypto_prices['SOL']
+                btc_int = int(crypto_prices['BTC']); ton_val = crypto_prices['TON']
+                eth_int = int(crypto_prices['ETH']); sol_val = crypto_prices['SOL']
 
-            msg = (
-                f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
-                f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> الدولار (100$): \u2067<b>{last_known_iqd:,}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
-                "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-                f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc_int:,}</b>\n'
-                f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: <b>${ton_val:,.2f}</b>\n'
-                f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> Ethereum: <b>${eth_int:,}</b>\n'
-                f'<tg-emoji emoji-id="6034974692115221805">☀️</tg-emoji> Solana: <b>${sol_val:,.2f}</b>\n'
-                "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-                f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية والمحلية</i>\n'
-                f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
-            )
-            
-            cached_msg = msg
-            last_fetch_time = current_time
-            return True
-    except Exception:
-        return False
+                cached_msg = (f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
+                       f'<tg-emoji emoji-id="5334775631366331709">🇮🇶</tg-emoji> الدولار (100$): \u2067<b>{last_known_iqd:,}</b> IQD <tg-emoji emoji-id="5850343127621046732">🐸</tg-emoji>\u2069\n'
+                       "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
+                       f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc_int:,}</b>\n'
+                       f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: <b>${ton_val:,.2f}</b>\n'
+                       f'<tg-emoji emoji-id="6034838120745143682">💠</tg-emoji> Ethereum: <b>${eth_int:,}</b>\n'
+                       f'<tg-emoji emoji-id="6034974692115221805">☀️</tg-emoji> Solana: <b>${sol_val:,.2f}</b>\n'
+                       "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
+                       f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية والمحلية</i>\n'
+                       f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>')
+                last_fetch_time = time.time()
+        except Exception: pass
+        await asyncio.sleep(5) # تحديث مستمر كل 5 ثواني
+
+def get_current_price(curr_code):
+    if curr_code == 'USD': return 1.0
+    elif curr_code == 'IQD': return last_known_iqd
+    elif curr_code == 'STARS': return 0.015
+    elif curr_code in crypto_prices: return crypto_prices[curr_code]
+    return 0
 
 def generate_conversion_msg(amount, currency_str):
     curr = currency_str.lower().strip()
@@ -329,7 +319,7 @@ def generate_conversion_msg(amount, currency_str):
     elif curr in ['سولانا', 'sol', 'solana']: base = 'SOL'; name = "سولانا (SOL)"; usd_val = amount * crypto_prices.get('SOL', 0)
     else: return "⚠️ عذراً، العملة غير مدعومة."
 
-    if usd_val == 0: return "⚠️ عذراً، لا يمكن حساب القيمة الآن."
+    if usd_val == 0: return "⚠️ عذراً، لا يمكن حساب القيمة الآن. يرجى المحاولة بعد ثانية."
 
     iqd_val = (usd_val * last_known_iqd) / 100
     ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
@@ -392,12 +382,9 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     target_price = float(match.group(1)); curr_code = context.user_data['alert_curr']; curr_name = context.user_data['alert_curr_name']
     
-    # التعديل: رجعت الدالة القديمة السريعة حتى يسحب السعر قبل لا ينبه
-    await update_prices_if_needed()
     current_price = get_current_price(curr_code)
-    
     if current_price == 0:
-        await send_custom_msg(update.message.chat_id, "⚠️ لا يمكن جلب السعر الحالي. الرجاء المحاولة بعد ثوانٍ.", update.message.message_id)
+        await send_custom_msg(update.message.chat_id, "⚠️ لا يمكن جلب السعر الحالي. الرجاء المحاولة بعد قليل.", update.message.message_id)
         return ConversationHandler.END
         
     direction = 'up' if target_price > current_price else 'down'
@@ -432,10 +419,6 @@ async def check_alerts_loop(app: Application):
         await asyncio.sleep(10) 
         if not alerts_db: continue
         
-        # التعديل: تحديث الأسعار حتى نراقب التنبيهات بانتظام
-        success = await update_prices_if_needed()
-        if not success: continue
-
         triggered_alerts = []; new_db = []
         for alert in alerts_db:
             if not alert['active']: continue
@@ -470,6 +453,8 @@ async def check_alerts_loop(app: Application):
         alerts_db = new_db
 
 async def post_init(app: Application):
+    # تشغيل دوال الخلفية لضمان السرعة والتنبيهات المستمرة
+    asyncio.create_task(background_price_updater())
     asyncio.create_task(check_alerts_loop(app))
 
 # --- معالجة إضافة المجموعة والأوامر الرئيسية ---
@@ -573,28 +558,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_custom_msg(chat_id, "توكل لك هذا الامر مو للفاشلين مثلك\nالامر للمالك  : @M6M9N", reply_to_message_id=msg_id)
         return
 
-    # فحص الحظر
     if user_id in BANNED_USERS: return
     
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word == text_lower for word in forbidden): return
 
-    # الأولوية 1: التأكد من العمليات الحسابية (مثل 5 تون) والرد الفوري الصاروخي
+    # الأولوية 1: العمليات الحسابية (مثل 3 تون) - الرد الفوري من الكاش
     calc_pattern = r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|بتكوين|بيتكوين|btc|bitcoin|ايثيريوم|إيثيريوم|eth|ethereum|سولانا|sol|solana|نجمه|نجمة|نجوم|star|stars|نج)'
     calc_match = re.search(calc_pattern, text_lower)
     if calc_match:
-        # التعديل: هنا نفحص الاشتراك الإجباري فقط إذا كان هذا أمر خاص بالبوت، ويرد عليه
         if not await is_force_sub_ok(update, context, msg_id): return 
         await check_new_user(update.message.from_user, context, is_calc=True)
         amount = float(calc_match.group(1)); currency_str = calc_match.group(2)
         
-        # التعديل: رجعت الدالة القديمة حتى يسحب السعر بلحظتها بدون ما يغلس
-        await update_prices_if_needed()
         reply = generate_conversion_msg(amount, currency_str)
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
         return
 
-    # باقي الأوامر الطبيعية
+    # الأوامر الرئيسية
     if text_lower in ["اوامر", "/اوامر", "الاوامر"]:
         if not await is_force_sub_ok(update, context, msg_id): return 
         await check_new_user(update.message.from_user, context)
@@ -653,7 +634,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_allowed:
         if not await is_force_sub_ok(update, context, msg_id): return 
         await check_new_user(update.message.from_user, context, is_calc=True)
-        await update_prices_if_needed()
         reply = cached_msg if cached_msg else "⚠️ عذراً، جاري تحديث الأسعار، حاول بعد ثواني.."
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
 
@@ -662,7 +642,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 web_app = Flask(__name__)
 @web_app.route('/')
-def home(): return "Ultra Pro Bot Active 🔥"
+def home(): return "Ultra Fast Bot Active 🔥"
 def run_web():
     port = int(os.environ.get("PORT", 8000))
     web_app.run(host="0.0.0.0", port=port)
@@ -682,7 +662,7 @@ def main():
             WAIT_UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_do_unban)],
             WAIT_FORCE_SUB: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_do_force_sub)]
         },
-        fallbacks=[CallbackQueryHandler(admin_callback_handler, pattern='^admin_')],
+        fallbacks=[CallbackQueryHandler(admin_callback_handler, pattern='^admin_cancel')],
         per_chat=True,
         per_user=True
     )
@@ -715,7 +695,7 @@ def main():
     app.add_handler(MessageHandler(filters.COMMAND, handle_message)) 
     app.add_error_handler(error_handler)
     
-    print("--- البوت شغال الآن ومستعد للعمل ---")
+    print("--- البوت شغال الآن ومستعد للعمل بسرعه فائقة ---")
     app.run_polling(drop_pending_updates=True, bootstrap_retries=10)
 
 if __name__ == "__main__":
