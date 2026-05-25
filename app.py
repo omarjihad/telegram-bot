@@ -495,12 +495,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["الاوامر", "اوامر"]:
         end_emojis = '<tg-emoji emoji-id="5210956306952758910">✔️</tg-emoji> <tg-emoji emoji-id="5958605483488055761">✅</tg-emoji>'
         msg = f"اهلا بك في قائمه اوامر البوت <tg-emoji emoji-id=\"5800769433974611462\">📋</tg-emoji>\n\n"
-        msg += f"<tg-emoji emoji-id=\"5408894951440279259\">1️⃣</tg-emoji> <b>/start</b> - لتشغيل البوت وعرض القائمة. {end_emojis}\n"
-        msg += f"<tg-emoji emoji-id=\"5411585799990830248\">2️⃣</tg-emoji> <b>/help</b> - لعرض رسالة المساعدة. {end_emojis}\n"
-        msg += f"<tg-emoji emoji-id=\"5409189019261103031\">3️⃣</tg-emoji> <b>نبهني</b> - لتعيين تنبيه لسعر عملة. {end_emojis}\n"
-        msg += f"<tg-emoji emoji-id=\"5411500398861118321\">4️⃣</tg-emoji> <b>رصيدي</b> - لعرض رصيد محفظتك المربوطة. {end_emojis}\n"
-        msg += f"<tg-emoji emoji-id=\"5409338071806146386\">5️⃣</tg-emoji> <b>اضافة معلومات</b> - لحفظ معلوماتك الشخصية. {end_emojis}\n"
-        msg += f"<tg-emoji emoji-id=\"5409194048667807708\">6️⃣</tg-emoji> <b>صرف</b> - لمعرفة سعر الصرف المباشر. {end_emojis}\n"
+        msg += f'<tg-emoji emoji-id="5408894951440279259">1️⃣</tg-emoji> <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات بشكل مباشر {end_emojis}\n\n'
+        msg += f'<tg-emoji emoji-id="5411585799990830248">2️⃣</tg-emoji> <b>نبهني</b>: لمراقبة سعر عملة معينة وتنبيهك عند وصولها للهدف {end_emojis}\n\n'
+        msg += f'<tg-emoji emoji-id="5409189019261103031">3️⃣</tg-emoji> <b>تنبيهاتي</b>: لعرض وإدارة التنبيهات المفعلة الخاصة بك {end_emojis}\n\n'
+        msg += f'<tg-emoji emoji-id="5411500398861118321">4️⃣</tg-emoji> <b>رصيدي</b>: لمعرفة رصيدك (TON و USDT) في المحفظة المربوطة {end_emojis}\n\n'
+        msg += f'<tg-emoji emoji-id="5409338071806146386">5️⃣</tg-emoji> <b>تغيير محفظتي</b>: لربط أو تغيير محفظة TON الخاصة بك {end_emojis}\n\n'
+        msg += f'<tg-emoji emoji-id="5409194048667807708">6️⃣</tg-emoji> <b>معلوماتي / اضافة معلومات</b>: لعرض وإدارة معلوماتك الشخصية المحفوظة {end_emojis}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
 
