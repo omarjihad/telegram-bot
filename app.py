@@ -61,7 +61,6 @@ async def is_force_sub_ok(update, context, reply_to_id=None):
         if member.status in ['left', 'kicked']:
             msg = f"⚠️ <b>عذراً، يجب عليك الاشتراك في قناة البوت أولاً لتتمكن من استخدام أوامره.</b>"
             btn = [[{"text": "📢 اشترك في القناة", "url": f"https://t.me/{FORCE_SUB_CHANNEL.replace('@', '')}", "style": "primary"}]]
-            # الرد المباشر على رسالة المستخدم
             await send_custom_msg(update.message.chat_id, msg, reply_to_message_id=reply_to_id, extra_buttons=btn)
             return False
         return True
@@ -362,6 +361,12 @@ async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     curr_input = update.message.text.strip()
+    
+    # 🛡️ إذا النص يحتوي على أرقام (مثل "9 تون")، نتعامل معه كعملية حسابية ونخرج من المحادثة فوراً
+    if re.search(r'\d', curr_input):
+        await update.message.reply_text("💡 جارٍ تحويل الطلب إلى الحاسبة...")
+        return await handle_message(update, context)
+
     if curr_input.startswith('/ايقاف') or curr_input == 'ايقاف': return await stop_alerts(update, context)
     curr_code = normalize_currency_msg(curr_input)
     if not curr_code:
@@ -453,7 +458,6 @@ async def check_alerts_loop(app: Application):
         alerts_db = new_db
 
 async def post_init(app: Application):
-    # تشغيل دوال الخلفية لضمان السرعة والتنبيهات المستمرة
     asyncio.create_task(background_price_updater())
     asyncio.create_task(check_alerts_loop(app))
 
