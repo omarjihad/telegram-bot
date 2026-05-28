@@ -240,21 +240,22 @@ async def save_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
     
-    if user_id not in user_info_db:
-        user_info_db[user_id] = {}
+    # التعديل هنا: نقوم بتفريغ بيانات المستخدم القديمة تماماً لكي لا يتم دمجها مع الجديدة
+    user_info_db[user_id] = {}
         
     lines = text.split('\n')
     for line in lines:
-        if ':' in line or ':' in line:
+        if ':' in line:
             parts = line.split(':', 1)
             if len(parts) == 2:
                 key = parts[0].strip()
                 val = parts[1].strip()
                 user_info_db[user_id][key] = val
                 
-    msg = "تم الحفض\nارسل معلوماتي او احد الاشياء التي اضفتها لعرض المعلومات"
+    msg = "تم الحفظ بنجاح، وتمت إزالة معلوماتك القديمة.\nارسل 'معلوماتي' او احد الاشياء التي اضفتها لعرض المعلومات"
     await send_custom_msg(update.message.chat_id, msg)
     return ConversationHandler.END
+
 
 # --- أنظمة الصرافة والأسعار الأساسية ---
 def normalize_currency(curr_str):
