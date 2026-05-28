@@ -5,6 +5,7 @@ import logging
 import threading
 import asyncio
 import re
+from datetime import datetime
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, filters, ContextTypes, ChatMemberHandler
@@ -22,7 +23,10 @@ last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
 crypto_prices = {'BTC': 0, 'TON': 0}
-previous_prices = {'BTC': 0, 'TON': 0, 'IQD': 0} # لتتبع الصعود والنزول
+
+# تتبع الصعود والنزول على مدار 24 ساعة
+crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0} # لتخزين نسبة التغيير اليومي للرقميات
+daily_iqd = {'date': '', 'open_price': 0} # لتخزين افتتاحية سعر الماستر اليومية
 
 # قواعد البيانات (في الذاكرة)
 alerts_db = []
@@ -64,7 +68,7 @@ async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=ADMIN_ID, text=msg)
         except Exception as e:
-            print(f"Error sending admin notification: {e}")
+            pass
 
 async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.my_chat_member
@@ -173,7 +177,7 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
         await edit_custom_msg(chat_id, msg_id, "عنوان المحفضه خطا ! ❌")
     return ConversationHandler.END
 
-# --- نظام معلوماتي (تم الإصلاح) ---
+# --- نظام معلوماتي ---
 async def add_info_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_new_user(update.effective_user, context)
     msg = ("ارسل معلوماتك بهذا الشكل:\n\n"
@@ -188,7 +192,7 @@ async def save_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
     
-    # تفريغ البيانات القديمة وحفظ الجديدة فقط
+    # تفريغ البيانات القديمة
     user_info_db[user_id] = {}
         
     lines = text.split('\n')
@@ -219,14 +223,23 @@ def get_current_price(curr_code):
     if curr_code == 'USD': return 1.0
     elif curr_code == 'IQD': return last_known_iqd
     elif curr_code == 'STARS': return 0.015
-    elif curr_code == 'ASIA': return 1.7
     elif curr_code in crypto_prices: return crypto_prices[curr_code]
     return 0
 
-def get_trend_emoji(currency, current_price):
-    prev = previous_prices.get(currency, 0)
-    if prev == 0 or current_price == prev: return ""
-    return UP_EMOJI if current_price > prev else DOWN_EMOJI
+# دالة استخراج ملصق الصعود والنزول على مدار 24 ساعة
+def get_daily_trend_emoji(currency, current_price=None):
+    if currency in ['BTC', 'TON']:
+        change = crypto_24h_trend.get(currency, 0.0)
+        if change > 0: return UP_EMOJI
+        elif change < 0: return DOWN_EMOJI
+        return ""
+    elif currency == 'IQD':
+        open_price = daily_iqd['open_price']
+        if open_price == 0 or current_price == open_price: return ""
+        if current_price > open_price: return UP_EMOJI
+        elif current_price < open_price: return DOWN_EMOJI
+        return ""
+    return ""
 
 async def fetch_mastercard_price(session):
     try:
@@ -243,7 +256,7 @@ async def fetch_mastercard_price(session):
     return None
 
 async def update_prices_if_needed():
-    global last_fetch_time, cached_msg, last_known_iqd, crypto_prices, previous_prices
+    global last_fetch_time, cached_msg, last_known_iqd, crypto_prices, crypto_24h_trend, daily_iqd
     current_time = time.time()
     
     if current_time - last_fetch_time < CACHE_TIME and cached_msg:
@@ -251,40 +264,51 @@ async def update_prices_if_needed():
         
     try:
         async with aiohttp.ClientSession() as session:
-            crypto_url = 'https://api.binance.com/api/v3/ticker/price?symbols=["BTCUSDT","TONUSDT"]'
+            # استخدام API التغيير خلال 24 ساعة بدلاً من السعر الحالي فقط
+            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","TONUSDT"]'
             crypto_task = session.get(crypto_url, timeout=10)
             master_task = fetch_mastercard_price(session)
             
             response, master_price_str = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
             
-            # حفظ الأسعار القديمة للمقارنة
-            previous_prices['BTC'] = crypto_prices['BTC']
-            previous_prices['TON'] = crypto_prices['TON']
-            previous_prices['IQD'] = last_known_iqd
-
             if not isinstance(response, Exception) and response.status == 200:
                 crypto_data = await response.json()
-                prices = {item['symbol']: float(item['price']) for item in crypto_data}
-                crypto_prices['BTC'] = prices.get('BTCUSDT', 0)
-                crypto_prices['TON'] = prices.get('TONUSDT', 0)
+                for item in crypto_data:
+                    symbol = item['symbol']
+                    if symbol == 'BTCUSDT':
+                        crypto_prices['BTC'] = float(item['lastPrice'])
+                        crypto_24h_trend['BTC'] = float(item['priceChangePercent'])
+                    elif symbol == 'TONUSDT':
+                        crypto_prices['TON'] = float(item['lastPrice'])
+                        crypto_24h_trend['TON'] = float(item['priceChangePercent'])
 
             if isinstance(master_price_str, str) and master_price_str.isdigit():
                 last_known_iqd = int(master_price_str)
+                
+            # حفظ افتتاحية سعر الماستر لليوم للمقارنة
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            if daily_iqd['date'] != today_str:
+                daily_iqd['date'] = today_str
+                daily_iqd['open_price'] = last_known_iqd
 
             btc_int = int(crypto_prices['BTC'])
             ton_val = crypto_prices['TON']
             
-            # جلب ملصقات الصعود والنزول
-            btc_trend = get_trend_emoji('BTC', crypto_prices['BTC'])
-            ton_trend = get_trend_emoji('TON', crypto_prices['TON'])
-            iqd_trend = get_trend_emoji('IQD', last_known_iqd)
+            # جلب ملصقات الصعود والنزول (مبنية على اليوم كامل)
+            btc_trend = get_daily_trend_emoji('BTC')
+            ton_trend = get_daily_trend_emoji('TON')
+            iqd_trend = get_daily_trend_emoji('IQD', last_known_iqd)
+            
+            # حساب آسيا (الـ 100 دولار شكد تطلع بالآسيا بناء على الماستر)
+            # الآسيا = الماستر / 0.9
+            asia_price_for_100_usd = int(last_known_iqd / 0.9)
 
             msg = (f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
                    f'{MASTER_EMOJI} الدولار (100$): \u2067<b>{last_known_iqd:,}</b> IQD {iqd_trend}\u2069\n'
+                   f'{ASIA_EMOJI} اسيا (100$): \u2067<b>{asia_price_for_100_usd:,}</b> دينار\u2069\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                    f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc_int:,}</b> {btc_trend}\n'
                    f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: <b>${ton_val:,.2f}</b> {ton_trend}\n'
-                   f'{ASIA_EMOJI} Asiacell: <b>$1.7</b>\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                    f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية والمحلية</i>\n'
                    f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>')
@@ -297,6 +321,7 @@ def generate_conversion_msg(amount, currency_str):
     curr = currency_str.lower()
     show_usd, show_iqd = True, True
 
+    # حساب القيمة بالدولار بناءً على العملة المدخلة
     if curr in ['دولار', 'usdt', 'usd']: 
         base, name, usd_val, show_usd = 'USD', "دولار (USDT)", amount, False  
     elif curr in ['ماستر', 'master']:
@@ -305,7 +330,13 @@ def generate_conversion_msg(amount, currency_str):
         usd_val = actual_iqd / (last_known_iqd / 100)
         show_iqd = False  
     elif curr in ['اسيا', 'asia', 'آسيا']:
-        base, name, usd_val = 'ASIA', f"{ASIA_EMOJI} اسيا", amount * 1.7
+        base, name = 'ASIA', f"{ASIA_EMOJI} اسيا"
+        # التعامل مع أرقام آسيا (مثلا كتب 100 قصده 100 الف)
+        actual_asia = amount * 1000 if amount < 100000 else amount
+        # تحويل الآسيا إلى ماستر (الآسيا تضرب في 0.9 لتصبح ماستر)
+        value_in_master = actual_asia * 0.9
+        # تحويل الماستر إلى دولار
+        usd_val = value_in_master / (last_known_iqd / 100)
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']:
         base, name, usd_val = 'STARS', '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم', amount * 0.015 
     elif curr in ['تون', 'ton']: 
@@ -316,18 +347,19 @@ def generate_conversion_msg(amount, currency_str):
 
     if usd_val == 0: return "⚠️ عذراً، لا يمكن حساب القيمة الآن."
 
+    # حساب النواتج للعملات الأخرى
     iqd_val = (usd_val * last_known_iqd) / 100
+    asia_val = iqd_val / 0.9  # تحويل الماستر إلى آسيا
     ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
     stars_val = usd_val / 0.015 
     btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
-    asia_val = usd_val / 1.7
 
     msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
     if show_usd: msg += f'💵 بالدولار: \u2067<b>${usd_val:,.3f}</b>\u2069\n'
-    if show_iqd: msg += f'{MASTER_EMOJI} بالعراقي: \u2067<b>{iqd_val:,.0f}</b> IQD\u2069\n'
+    if show_iqd: msg += f'{MASTER_EMOJI} بالماستر: \u2067<b>{iqd_val:,.0f}</b> IQD\u2069\n'
+    if base != 'ASIA': msg += f'{ASIA_EMOJI} بالاسيا: \u2067<b>{asia_val:,.0f}</b> دينار\u2069\n'
     msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
     if base != 'TON' and ton_val > 0: msg += f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> تون: <b>{ton_val:,.2f}</b> TON\n'
-    if base != 'ASIA' and asia_val > 0: msg += f'{ASIA_EMOJI} اسيا: <b>{asia_val:,.1f}</b>\n'
     if base != 'STARS' and stars_val > 0: msg += f'<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم: <b>{stars_val:,.0f}</b> Stars\n'
     if base != 'STARS' and base != 'BTC' and btc_val > 0: 
         msg += f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> بتكوين: <b>{btc_val:,.6f}</b> BTC\n'
@@ -422,11 +454,10 @@ async def check_whales_loop(app: Application):
     """ مراقبة التحويلات الضخمة لشبكة تون وإرسالها للمشتركين """
     last_tx_hash = ""
     while True:
-        await asyncio.sleep(20) # فحص كل 20 ثانية
+        await asyncio.sleep(20) 
         if not whale_alert_users: continue
         
         try:
-            # نستخدم محفظة بينانس الساخنة على TON كمؤشر لحركات الحيتان الكبيرة
             wallet = "EQBX63RAdgShnrJGptNINn2uUFIqEQ9_hD0z4E7h-gH-Zk5t" 
             url = f"https://tonapi.io/v2/accounts/{wallet}/events?limit=5"
             async with aiohttp.ClientSession() as session:
@@ -443,7 +474,6 @@ async def check_whales_loop(app: Application):
                                 if action['type'] == 'TonTransfer':
                                     amount = action['TonTransfer']['amount'] / 1e9
                                     if amount >= 8000:
-                                        # تجهيز الرسالة وإرسالها للمشتركين
                                         grouped_by_chat = {}
                                         for uid, udata in whale_alert_users.items():
                                             cid = udata['chat_id']
@@ -457,7 +487,7 @@ async def check_whales_loop(app: Application):
                                                    f"هل صعود {UP_EMOJI}؟ او نزول {DOWN_EMOJI}؟")
                                             await send_custom_msg(cid, msg)
         except Exception:
-            pass # تجاهل الأخطاء بصمت لعدم إيقاف اللوب
+            pass 
 
 # --- اللوب الرئيسي لتنبيهات الأسعار ---
 async def check_alerts_loop(app: Application):
@@ -496,7 +526,7 @@ async def check_alerts_loop(app: Application):
 
 async def post_init(app: Application):
     asyncio.create_task(check_alerts_loop(app))
-    asyncio.create_task(check_whales_loop(app)) # تشغيل لوب مراقبة الحيتان
+    asyncio.create_task(check_whales_loop(app)) 
 
 # --- معالجة الرسائل العامة ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
