@@ -50,6 +50,7 @@ ASIA_EMOJI = '<tg-emoji emoji-id="5183779703818814840">🔴</tg-emoji>'
 MASTER_EMOJI = '<tg-emoji emoji-id="5812036009365343919">💳</tg-emoji>'
 
 # ملصقات عامة تم إضافتها للنصوص
+CLIPBOARD_EMOJI = '<tg-emoji emoji-id="5800769433974611462">📋</tg-emoji>'
 END_EMOJIS = '<tg-emoji emoji-id="5210956306952758910">✔️</tg-emoji> <tg-emoji emoji-id="5958605483488055761">✅</tg-emoji>'
 WARN_EMOJI = '<tg-emoji emoji-id="5213195952008997792">⚠️</tg-emoji>'
 CROWN_EMOJI = '<tg-emoji emoji-id="6048861163196783957">👑</tg-emoji>'
@@ -80,7 +81,7 @@ async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
         username = f"@{user.username}" if user.username else str(user.id)
         msg = f"🟢 دخل شخص جديد\nعدد المستخدمين الان: {len(bot_users)}\nيوزر الشخص: {username}"
         try:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=msg)
+            await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode="HTML")
         except Exception:
             pass
 
@@ -88,13 +89,21 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
     result = update.my_chat_member
     if result.new_chat_member.status in ["member", "administrator"] and result.old_chat_member.status not in ["member", "administrator"]:
         chat = result.chat
-        msg = "تم تشغيل البوت اكتب الاوامر او اوامر لعرض الشرح"
+        msg = f"تم تشغيل البوت اكتب الاوامر او اوامر لعرض الشرح {HELLO_EMOJI}"
         try:
             await send_custom_msg(chat.id, msg)
         except: pass
-        admin_msg = f"{WHALE_BELL} تم إضافة البوت إلى مجموعة جديدة!\nالاسم: {chat.title}\nالآيدي: {chat.id}"
+        
+        # تصليح إشعار إضافة المجموعة للآدمن
+        admin_msg = f"{WHALE_BELL} <b>تم إضافة البوت إلى مجموعة جديدة!</b>\nالاسم: {html.escape(chat.title)}\nالآيدي: <code>{chat.id}</code>"
+        
+        if chat.username:
+            admin_msg += f"\nالرابط: https://t.me/{chat.username}"
+        else:
+            admin_msg += f"\nالرابط: <i>مجموعة خاصة (لا يوجد رابط عام)</i>"
+            
         try:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg)
+            await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode="HTML")
         except: pass
 
 # --- دالة الإرسال الشاملة ---
@@ -155,6 +164,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     safe_name = html.escape(user.first_name)
     
+    # رابط الإضافة مع صلاحيات الإدارة كاملة
+    add_bot_url = f"https://t.me/{context.bot.username}?startgroup=true&admin=change_info,delete_messages,restrict_members,invite_users,pin_messages,manage_chat"
+    
     if 'link_wallet' in text or 'change_wallet' in text:
         if 'link_wallet' in text and user.id in user_wallets:
             msg = f"لديك محفضه مربوطه بالفعل\nلتغيير محفضتك اضغط على الزر ادناه {DOWN_EMOJI} :"
@@ -169,7 +181,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (f"أهلاً بك في البوت يا {safe_name}! {HELLO_EMOJI}\n\n"
                f"هذا البوت يقدم خدمات الصرافة والتنبيهات الذكية وحفظ المعلومات.\n"
                f"اكتب <b>الاوامر</b> او <b>اوامر</b> لعرض جميع خدمات البوت.")
-        btn = [[{"text": "اضافه البوت الى مجموعتي", "url": f"https://t.me/{context.bot.username}?startgroup=true", "style": "primary"}]]
+        btn = [[{"text": "اضافه البوت الى مجموعتي", "url": add_bot_url, "style": "primary"}]]
         await send_custom_msg(chat_id, msg, extra_buttons=btn)
         return ConversationHandler.END
 
@@ -545,7 +557,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # الأوامر والقائمة
     if text in ["الاوامر", "اوامر"]:
-        msg = f"اهلا بك في قائمه اوامر البوت {CLIPBOARD}\n\n"
+        msg = f"اهلا بك في قائمه اوامر البوت {CLIPBOARD_EMOJI}\n\n"
         msg += f'{NUM_EMOJIS[1]} <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات مباشرة (دولار، ماستر، تون، بتكوين، اسيا، نجوم) {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[2]} <b>نبهني</b>: لمراقبة سعر عملة معينة وتنبيهك عند وصولها للهدف {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[3]} <b>تنبيهاتي</b>: لعرض وإدارة تنبيهات الأسعار الخاصة بك {END_EMOJIS}\n\n'
