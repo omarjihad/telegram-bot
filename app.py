@@ -5,7 +5,7 @@ import logging
 import threading
 import asyncio
 import re
-import html # تمت إضافة هذه المكتبة لحماية الـ HTML
+import html 
 from datetime import datetime
 from flask import Flask
 from telegram import Update
@@ -34,20 +34,33 @@ alerts_db = []
 user_wallets = {} 
 bot_users = set() 
 user_info_db = {} 
-whale_alert_users = {} # {user_id: {"name": "...", "chat_id": ...}}
+whale_alert_users = {} 
 
 # حالات المحادثة
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
 ASK_INFO = 4 
 
-# --- الملصقات المميزة الجديدة ---
+# --- الملصقات المميزة ---
 UP_EMOJI = '<tg-emoji emoji-id="5449683594425410231">📈</tg-emoji>'
 DOWN_EMOJI = '<tg-emoji emoji-id="5447183459602669338">📉</tg-emoji>'
 WHALE_BELL = '<tg-emoji emoji-id="5215372534060428125">🔔</tg-emoji>'
 WHALE_EMOJI = '<tg-emoji emoji-id="5461151367559141950">🐋</tg-emoji>'
 ASIA_EMOJI = '<tg-emoji emoji-id="5183779703818814840">🔴</tg-emoji>'
 MASTER_EMOJI = '<tg-emoji emoji-id="5812036009365343919">💳</tg-emoji>'
+
+# ملصقات عامة تم إضافتها للنصوص
+END_EMOJIS = '<tg-emoji emoji-id="5210956306952758910">✔️</tg-emoji> <tg-emoji emoji-id="5958605483488055761">✅</tg-emoji>'
+WARN_EMOJI = '<tg-emoji emoji-id="5213195952008997792">⚠️</tg-emoji>'
+CROWN_EMOJI = '<tg-emoji emoji-id="6048861163196783957">👑</tg-emoji>'
+PLANE_EMOJI = '<tg-emoji emoji-id="5319250406923051255">✈️</tg-emoji>'
+SEARCH_EMOJI = '<tg-emoji emoji-id="5411597774359653692">🔍</tg-emoji>'
+WAIT_EMOJI = '<tg-emoji emoji-id="5215484787325676090">⏳</tg-emoji>'
+SUCCESS_EMOJI = '<tg-emoji emoji-id="5215492745900077682">✅</tg-emoji>'
+FAIL_EMOJI = '<tg-emoji emoji-id="5215204871422093648">❌</tg-emoji>'
+TON_GEM = '<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji>'
+USDT_CASH = '<tg-emoji emoji-id="5213170203680060059">💵</tg-emoji>'
+HELLO_EMOJI = '<tg-emoji emoji-id="5800769433974611462">👋</tg-emoji>'
 
 # أرقام الملصقات
 NUM_EMOJIS = {
@@ -79,7 +92,7 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             await send_custom_msg(chat.id, msg)
         except: pass
-        admin_msg = f"🔔 تم إضافة البوت إلى مجموعة جديدة!\nالاسم: {chat.title}\nالآيدي: {chat.id}"
+        admin_msg = f"{WHALE_BELL} تم إضافة البوت إلى مجموعة جديدة!\nالاسم: {chat.title}\nالآيدي: {chat.id}"
         try:
             await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg)
         except: pass
@@ -144,16 +157,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if 'link_wallet' in text or 'change_wallet' in text:
         if 'link_wallet' in text and user.id in user_wallets:
-            msg = "لديك محفضه مربوطه بالفعل\nلتغيير محفضتك اضغط على الزر ادناه :"
+            msg = f"لديك محفضه مربوطه بالفعل\nلتغيير محفضتك اضغط على الزر ادناه {DOWN_EMOJI} :"
             btn = [[{"text": "ربط محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
             await send_custom_msg(chat_id, msg, extra_buttons=btn)
             return ConversationHandler.END
         else:
-            msg = f"اهلا بك {safe_name} 👑\n\nقم بارسال عنوان محفضتك \nاو الادرس الخاص بك لربط محفضتك ✈️"
+            msg = f"اهلا بك {safe_name} {CROWN_EMOJI}\n\nقم بارسال عنوان محفضتك \nاو الادرس الخاص بك لربط محفضتك {PLANE_EMOJI}"
             await send_custom_msg(chat_id, msg)
             return ASK_WALLET
     else:
-        msg = (f"أهلاً بك في البوت يا {safe_name}! 👋\n\n"
+        msg = (f"أهلاً بك في البوت يا {safe_name}! {HELLO_EMOJI}\n\n"
                f"هذا البوت يقدم خدمات الصرافة والتنبيهات الذكية وحفظ المعلومات.\n"
                f"اكتب <b>الاوامر</b> او <b>اوامر</b> لعرض جميع خدمات البوت.")
         btn = [[{"text": "اضافه البوت الى مجموعتي", "url": f"https://t.me/{context.bot.username}?startgroup=true", "style": "primary"}]]
@@ -165,18 +178,18 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
     
-    msg_id = await send_custom_msg(chat_id, "يتم البحث عن محفضتك... 🔍")
+    msg_id = await send_custom_msg(chat_id, f"يتم البحث عن محفضتك... {SEARCH_EMOJI}")
     is_valid, _, _ = await check_ton_wallet(address)
     
     if is_valid:
         await asyncio.sleep(1.5)
-        await edit_custom_msg(chat_id, msg_id, "جاري ربط المحفضه بالبوت... ⏳")
+        await edit_custom_msg(chat_id, msg_id, f"جاري ربط المحفضه بالبوت... {WAIT_EMOJI}")
         await asyncio.sleep(1.5)
         user_wallets[user_id] = address
-        await edit_custom_msg(chat_id, msg_id, "تم ربط محفضتك بنجاح  . ✅")
+        await edit_custom_msg(chat_id, msg_id, f"تم ربط محفضتك بنجاح  . {SUCCESS_EMOJI}")
     else:
         await asyncio.sleep(1.5)
-        await edit_custom_msg(chat_id, msg_id, "عنوان المحفضه خطا ! ❌")
+        await edit_custom_msg(chat_id, msg_id, f"عنوان المحفضه خطا ! {FAIL_EMOJI}")
     return ConversationHandler.END
 
 # --- نظام معلوماتي ---
@@ -205,7 +218,7 @@ async def save_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 val = parts[1].strip()
                 user_info_db[user_id][key] = val
                 
-    msg = "تم الحفظ بنجاح، وتمت إزالة معلوماتك القديمة.\nارسل 'معلوماتي' او احد الاشياء التي اضفتها لعرض المعلومات"
+    msg = f"تم الحفظ بنجاح، وتمت إزالة معلوماتك القديمة {SUCCESS_EMOJI}\nارسل 'معلوماتي' او احد الاشياء التي اضفتها لعرض المعلومات"
     await send_custom_msg(update.message.chat_id, msg)
     return ConversationHandler.END
 
@@ -298,7 +311,6 @@ async def update_prices_if_needed():
             
             asia_price_for_100_usd = int(last_known_iqd / 0.9)
 
-            # تمت إزالة الأقواس المخفية \u2067 لضمان عمل الملصقات في الـ HTML
             msg = (f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
                    f'{MASTER_EMOJI} الدولار (100$): <b>{last_known_iqd:,}</b> IQD {iqd_trend}\n'
                    f'{ASIA_EMOJI} اسيا (100$): <b>{asia_price_for_100_usd:,}</b> دينار\n'
@@ -335,9 +347,9 @@ def generate_conversion_msg(amount, currency_str):
         base, name, usd_val = 'TON', "تون (TON)", amount * crypto_prices.get('TON', 0)
     elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: 
         base, name, usd_val = 'BTC', "بتكوين (BTC)", amount * crypto_prices.get('BTC', 0)
-    else: return "⚠️ عذراً، العملة غير مدعومة."
+    else: return f"عذراً، العملة غير مدعومة. {WARN_EMOJI}"
 
-    if usd_val == 0: return "⚠️ عذراً، لا يمكن حساب القيمة الآن."
+    if usd_val == 0: return f"عذراً، لا يمكن حساب القيمة الآن. {WARN_EMOJI}"
 
     iqd_val = (usd_val * last_known_iqd) / 100
     asia_val = iqd_val / 0.9 
@@ -345,13 +357,12 @@ def generate_conversion_msg(amount, currency_str):
     stars_val = usd_val / 0.015 
     btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
 
-    # إزالة الرموز \u2067 المخفية لحماية الملصقات
     msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
-    if show_usd: msg += f'💵 بالدولار: <b>${usd_val:,.3f}</b>\n'
+    if show_usd: msg += f'{USDT_CASH} بالدولار: <b>${usd_val:,.3f}</b>\n'
     if show_iqd: msg += f'{MASTER_EMOJI} بالماستر: <b>{iqd_val:,.0f}</b> IQD\n'
     if base != 'ASIA': msg += f'{ASIA_EMOJI} بالاسيا: <b>{asia_val:,.0f}</b> دينار\n'
     msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-    if base != 'TON' and ton_val > 0: msg += f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> تون: <b>{ton_val:,.2f}</b> TON\n'
+    if base != 'TON' and ton_val > 0: msg += f'{TON_GEM} تون: <b>{ton_val:,.2f}</b> TON\n'
     if base != 'STARS' and stars_val > 0: msg += f'<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم: <b>{stars_val:,.0f}</b> Stars\n'
     if base != 'STARS' and base != 'BTC' and btc_val > 0: 
         msg += f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> بتكوين: <b>{btc_val:,.6f}</b> BTC\n'
@@ -361,7 +372,7 @@ def generate_conversion_msg(amount, currency_str):
 
 # --- نظام التنبيهات (الأسعار) ---
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "🔔 <b>نظام التنبيهات الذكي</b>\n\nاكتب اسم العملة اللي تريد أراقبها (مثال: تون، بتكوين، ماستر...):"
+    msg = f"{WHALE_BELL} <b>نظام التنبيهات الذكي</b>\n\nاكتب اسم العملة اللي تريد أراقبها (مثال: تون، بتكوين، ماستر...):"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
     return ASK_CURRENCY
 
@@ -370,11 +381,11 @@ async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if curr_input.startswith('/ايقاف') or curr_input == 'ايقاف': return await stop_alerts(update, context)
     curr_code = normalize_currency(curr_input)
     if not curr_code:
-        await send_custom_msg(update.message.chat_id, "⚠️ عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح:", update.message.message_id)
+        await send_custom_msg(update.message.chat_id, f"عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح: {WARN_EMOJI}", update.message.message_id)
         return ASK_CURRENCY
     
     context.user_data['alert_curr'] = curr_code; context.user_data['alert_curr_name'] = curr_input
-    await send_custom_msg(update.message.chat_id, f"✅ تم اختيار: <b>{curr_input}</b>\n\n✍️ الآن ادخل السعر الذي تريد التنبيه عنده (أرقام فقط):", update.message.message_id)
+    await send_custom_msg(update.message.chat_id, f"{SUCCESS_EMOJI} تم اختيار: <b>{curr_input}</b>\n\nالآن ادخل السعر الذي تريد التنبيه عنده (أرقام فقط):", update.message.message_id)
     return ASK_PRICE
 
 async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -382,7 +393,7 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if price_input.startswith('/ايقاف') or price_input == 'ايقاف': return await stop_alerts(update, context)
     match = re.search(r'(\d+(?:\.\d+)?)', price_input)
     if not match:
-        await send_custom_msg(update.message.chat_id, "⚠️ يرجى إدخال رقم صحيح:", update.message.message_id)
+        await send_custom_msg(update.message.chat_id, f"يرجى إدخال رقم صحيح: {WARN_EMOJI}", update.message.message_id)
         return ASK_PRICE
         
     target_price = float(match.group(1))
@@ -393,16 +404,16 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_price = get_current_price(curr_code)
     
     if current_price == 0:
-        await send_custom_msg(update.message.chat_id, "⚠️ عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً.", update.message.message_id)
+        await send_custom_msg(update.message.chat_id, f"عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً. {WARN_EMOJI}", update.message.message_id)
         return ConversationHandler.END
     if target_price == current_price:
-        await send_custom_msg(update.message.chat_id, f"⚠️ الـ {curr_name} أصلاً واصل هذا السعر بالضبط! 😅", update.message.message_id)
+        await send_custom_msg(update.message.chat_id, f"الـ {curr_name} أصلاً واصل هذا السعر بالضبط! {WARN_EMOJI}", update.message.message_id)
         return ConversationHandler.END
         
     direction = 'up' if target_price > current_price else 'down'
     alerts_db.append({'user_id': update.message.from_user.id, 'name': safe_name, 'chat_id': update.message.chat_id, 'currency': curr_code, 'curr_name': curr_name, 'target': target_price, 'direction': direction, 'active': True})
     
-    msg = (f"✅ <b>تم التفعيل!</b>\nسيتم تنبيهك عند وصول الـ {curr_name} إلى <code>{target_price:g}</code>\n\nلإيقاف التنبيه ارسل /ايقاف")
+    msg = (f"{SUCCESS_EMOJI} <b>تم التفعيل!</b>\nسيتم تنبيهك عند وصول الـ {curr_name} إلى <code>{target_price:g}</code>\n\nلإيقاف التنبيه ارسل /ايقاف")
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
     return ConversationHandler.END
 
@@ -411,7 +422,7 @@ async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     initial_len = len(alerts_db)
     alerts_db = [a for a in alerts_db if a['user_id'] != user_id]
-    msg = "🛑 تم إيقاف جميع تنبيهات الأسعار بنجاح." if len(alerts_db) < initial_len else "⚠️ ليس لديك أي تنبيهات أسعار مفعلة."
+    msg = f"تم إيقاف جميع تنبيهات الأسعار بنجاح. {SUCCESS_EMOJI}" if len(alerts_db) < initial_len else f"ليس لديك أي تنبيهات أسعار مفعلة. {WARN_EMOJI}"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
     return ConversationHandler.END
 
@@ -419,9 +430,9 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_alerts = [a for a in alerts_db if a['user_id'] == user_id and a['active']]
     if not user_alerts:
-        await send_custom_msg(update.message.chat_id, "🔕 لا توجد لديك أي تنبيهات مفعلة حالياً.", update.message.message_id)
+        await send_custom_msg(update.message.chat_id, f"لا توجد لديك أي تنبيهات مفعلة حالياً. {WARN_EMOJI}", update.message.message_id)
         return
-    msg = "🔔 <b>تنبيهاتك الحالية:</b>\n\n"
+    msg = f"{WHALE_BELL} <b>تنبيهاتك الحالية:</b>\n\n"
     for idx, a in enumerate(user_alerts, 1):
         msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code>\n"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
@@ -434,10 +445,10 @@ async def toggle_whale_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if user_id in whale_alert_users:
         del whale_alert_users[user_id]
-        await send_custom_msg(chat_id, "تم الغاء تفعيل تنبيهات الحيتان 🔕", update.message.message_id)
+        await send_custom_msg(chat_id, f"تم الغاء تفعيل تنبيهات الحيتان {SUCCESS_EMOJI}", update.message.message_id)
     else:
         whale_alert_users[user_id] = {"name": safe_name, "chat_id": chat_id}
-        msg = ("✅ <b>تم تفعيل تنبيهات الحيتان بنجاح!</b>\n\n"
+        msg = (f"{SUCCESS_EMOJI} <b>تم تفعيل تنبيهات الحيتان بنجاح!</b>\n\n"
                "<b>الفائدة من هذا الوضع:</b>\n"
                "البوت سيقوم بمراقبة شبكة عملة TON، وعند حدوث عملية تحويل ضخمة جداً (أكثر من 8000 تون)، "
                "سيصلك إشعار فوري. هذه الحركات الكبيرة تؤثر عادةً على السعر وتساعدك في اتخاذ قرارات الشراء أو البيع في الوقت المناسب.")
@@ -511,7 +522,7 @@ async def check_alerts_loop(app: Application):
             for chat_id, currencies in grouped.items():
                 for curr_code, alerts in currencies.items():
                     mentions = " ".join([f"<a href='tg://user?id={a['user_id']}'>{a['name']}</a>" for a in alerts])
-                    msg = (f"🚨 {mentions}\n\n🔥 <b>الحگ! الـ {alerts[0]['curr_name']} وصل للسعر المطلوب!</b>\n"
+                    msg = (f"{WARN_EMOJI} {mentions}\n\n🔥 <b>الحگ! الـ {alerts[0]['curr_name']} وصل للسعر المطلوب!</b>\n"
                            f"السعر الحالي: <b>{get_current_price(curr_code):g}</b>\n\nلإيقاف التنبيهات ارسل /ايقاف")
                     await send_custom_msg(chat_id, msg)
         alerts_db = [a for a in alerts_db if a['active']]
@@ -534,14 +545,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # الأوامر والقائمة
     if text in ["الاوامر", "اوامر"]:
-        msg = f"اهلا بك في قائمه اوامر البوت 📋\n\n"
-        msg += f'{NUM_EMOJIS[1]} <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات مباشرة (دولار، ماستر، تون، بتكوين، اسيا، نجوم)\n\n'
-        msg += f'{NUM_EMOJIS[2]} <b>نبهني</b>: لمراقبة سعر عملة معينة وتنبيهك عند وصولها للهدف\n\n'
-        msg += f'{NUM_EMOJIS[3]} <b>تنبيهاتي</b>: لعرض وإدارة تنبيهات الأسعار الخاصة بك\n\n'
-        msg += f'{NUM_EMOJIS[4]} <b>تفعيل التنبيهات</b>: لتفعيل/إلغاء وضع مراقبة حيتان TON وإرسال إشعار للتحويلات الضخمة\n\n'
-        msg += f'{NUM_EMOJIS[5]} <b>رصيدي</b>: لمعرفة رصيدك في المحفظة المربوطة\n\n'
-        msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير محفظة TON الخاصة بك\n\n'
-        msg += f'{NUM_EMOJIS[7]} <b>معلوماتي / اضافة معلومات</b>: لعرض وإدارة معلوماتك الشخصية المحفوظة\n'
+        msg = f"اهلا بك في قائمه اوامر البوت {CLIPBOARD}\n\n"
+        msg += f'{NUM_EMOJIS[1]} <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات مباشرة (دولار، ماستر، تون، بتكوين، اسيا، نجوم) {END_EMOJIS}\n\n'
+        msg += f'{NUM_EMOJIS[2]} <b>نبهني</b>: لمراقبة سعر عملة معينة وتنبيهك عند وصولها للهدف {END_EMOJIS}\n\n'
+        msg += f'{NUM_EMOJIS[3]} <b>تنبيهاتي</b>: لعرض وإدارة تنبيهات الأسعار الخاصة بك {END_EMOJIS}\n\n'
+        msg += f'{NUM_EMOJIS[4]} <b>تفعيل التنبيهات</b>: لتفعيل/إلغاء وضع مراقبة حيتان TON وإرسال إشعار للتحويلات الضخمة {END_EMOJIS}\n\n'
+        msg += f'{NUM_EMOJIS[5]} <b>رصيدي</b>: لمعرفة رصيدك في المحفظة المربوطة {END_EMOJIS}\n\n'
+        msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير محفظة TON الخاصة بك {END_EMOJIS}\n\n'
+        msg += f'{NUM_EMOJIS[7]} <b>معلوماتي / اضافة معلومات</b>: لعرض وإدارة معلوماتك الشخصية المحفوظة {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
 
@@ -553,7 +564,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # معلوماتي
     if text in ["معلوماتي", "/معلوماتي"]:
         if user_id not in user_info_db or not user_info_db[user_id]:
-            msg = "لم تقم باضافه اي معلومات ⚠️\nلأضافه معلومات عن نفسك اكتب <b>اضافة معلومات</b>"
+            msg = f"لم تقم باضافه اي معلومات {WARN_EMOJI}\nلأضافه معلومات عن نفسك اكتب <b>اضافة معلومات</b>"
             await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         else:
             msg = "معلوماتك المحفوظة:\n\n"
@@ -570,20 +581,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # رصيدي وتغيير المحفظة
     if text in ["رصيدي", "/رصيدي", "رص", "/رص"]:
         if user_id not in user_wallets:
-            msg = "لم تقم بربط محفضتك بالبوت ⚠️"
-            btn = [[{"text": "ربط محفضتي", "url": f"https://t.me/{context.bot.username}?start=link_wallet", "style": "success"}]]
+            msg = f"لم تقم بربط محفضتك بالبوت {WARN_EMOJI}"
+            btn = [[{"text": "ربط محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
             await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, extra_buttons=btn)
         else:
             is_valid, ton_bal, usdt_bal = await check_ton_wallet(user_wallets[user_id])
             if is_valid:
-                await send_custom_msg(chat_id, f"الان لديك  :\nTON 💎: {ton_bal:.2f}\nUSDT 💵: {usdt_bal:.2f}", reply_to_message_id=msg_id)
+                await send_custom_msg(chat_id, f"الان لديك :\nTON {TON_GEM}: {ton_bal:.2f}\nUSDT {USDT_CASH}: {usdt_bal:.2f}", reply_to_message_id=msg_id)
             else:
-                await send_custom_msg(chat_id, "⚠️ عذراً، مشكلة في محفظتك المربوطة.", reply_to_message_id=msg_id)
+                await send_custom_msg(chat_id, f"عذراً، مشكلة في محفظتك المربوطة. {WARN_EMOJI}", reply_to_message_id=msg_id)
         return
         
     if text in ["تغيير محفظتي", "/تغيير محفظتي", "تغيير محفضتي", "/تغيير محفضتي"]:
-        btn = [[{"text": "ربط محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
-        await send_custom_msg(chat_id, "اضغط على الزر أدناه لتغيير محفظتك المربوطة:", reply_to_message_id=msg_id, extra_buttons=btn)
+        btn = [[{"text": "تغيير محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
+        await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
     # الصرافة الحاسبة
@@ -598,7 +609,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "btc", "ton", "ماستر", "نجوم", "نجمة", "نج", "اسيا"]
     if any(phrase in text for phrase in ["صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار"]) or text in ["ص", "صر", "صرف", "تون", "دولار", "ماستر", "نجوم", "نجمة", "نج", "اسيا"] or any(word == text for word in allowed_keywords):
         await update_prices_if_needed()
-        reply = cached_msg if cached_msg else "⚠️ عذراً، حاول ثواني.."
+        reply = cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}"
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
