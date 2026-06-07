@@ -78,12 +78,7 @@ NUM_EMOJIS = {
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in bot_users:
         bot_users.add(user.id)
-        username = f"@{user.username}" if user.username else str(user.id)
-        msg = f"🟢 دخل شخص جديد\nعدد المستخدمين الان: {len(bot_users)}\nيوزر الشخص: {username}"
-        try:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=msg, parse_mode="HTML")
-        except Exception:
-            pass
+        # تم مسح كود إشعار الأدمن لدخول مستخدم جديد حسب طلبك.
 
 async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.my_chat_member
@@ -94,7 +89,6 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
             await send_custom_msg(chat.id, msg)
         except: pass
         
-        # تصليح إشعار إضافة المجموعة للآدمن
         admin_msg = f"{WHALE_BELL} <b>تم إضافة البوت إلى مجموعة جديدة!</b>\nالاسم: {html.escape(chat.title)}\nالآيدي: <code>{chat.id}</code>"
         
         if chat.username:
@@ -164,7 +158,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     safe_name = html.escape(user.first_name)
     
-    # رابط الإضافة مع صلاحيات الإدارة كاملة
     add_bot_url = f"https://t.me/{context.bot.username}?startgroup=true&admin=change_info,delete_messages,restrict_members,invite_users,pin_messages,manage_chat"
     
     if 'link_wallet' in text or 'change_wallet' in text:
@@ -449,7 +442,7 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code>\n"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
 
-# --- نظام تنبيهات الحيتان (TON Network) ---
+# --- نظام تنبيهات الحيتان (تم اصلاح خطأ الآيدي) ---
 async def toggle_whale_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     chat_id = update.message.chat_id
@@ -480,14 +473,21 @@ async def check_whales_loop(app: Application):
                     if resp.status == 200:
                         data = await resp.json()
                         events = data.get('events', [])
+                        
+                        if not events: continue
+                        
+                        # تحديث المنطق: نحفظ احدث ايدي قبل لا نبدي نفحص
+                        new_latest_hash = events[0].get('event_id')
+                        
                         for event in events:
                             tx_hash = event.get('event_id')
-                            if tx_hash == last_tx_hash: break
-                            last_tx_hash = tx_hash
+                            if tx_hash == last_tx_hash: 
+                                break # وصلنا للتحويلات القديمة اللي فاحصيها مسبقاً
                             
                             for action in event.get('actions', []):
-                                if action['type'] == 'TonTransfer':
-                                    amount = action['TonTransfer']['amount'] / 1e9
+                                if action.get('type') == 'TonTransfer':
+                                    ton_transfer_data = action.get('TonTransfer', {})
+                                    amount = float(ton_transfer_data.get('amount', 0)) / 1e9
                                     if amount >= 8000:
                                         grouped_by_chat = {}
                                         for uid, udata in whale_alert_users.items():
@@ -501,6 +501,9 @@ async def check_whales_loop(app: Application):
                                                    f"حصلت عملية تحويل بقيمه {amount:,.0f} تون {WHALE_EMOJI}\n\n"
                                                    f"هل صعود {UP_EMOJI}؟ او نزول {DOWN_EMOJI}؟")
                                             await send_custom_msg(cid, msg)
+                                            
+                        # نحدث اخر آيدي بعد ما نخلص الفحص
+                        last_tx_hash = new_latest_hash
         except Exception:
             pass 
 
@@ -609,17 +612,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
-    # الصرافة الحاسبة
-    calc_match = re.search(r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|نجمه|نجمة|نجوم|star|stars|نج)', text)
+    # الصرافة الحاسبة - تم تشديد البحث ليكون فقط للرقم واسم العملة حصراً
+    calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|نجمه|نجمة|نجوم|star|stars|نج)\s*$', text)
     if calc_match:
         await update_prices_if_needed()
         reply = generate_conversion_msg(float(calc_match.group(1)), calc_match.group(2))
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
         return
 
-    # جلب الأسعار
-    allowed_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "btc", "ton", "ماستر", "نجوم", "نجمة", "نج", "اسيا"]
-    if any(phrase in text for phrase in ["صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار"]) or text in ["ص", "صر", "صرف", "تون", "دولار", "ماستر", "نجوم", "نجمة", "نج", "اسيا"] or any(word == text for word in allowed_keywords):
+    # جلب الأسعار - تم تقييد الكلمات حتى البوت ما يرد بشكل عشوائي
+    exact_price_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "btc", "ton", "ماستر", "نجوم", "نجمة", "نج", "اسيا", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]
+    if text in exact_price_keywords:
         await update_prices_if_needed()
         reply = cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}"
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
