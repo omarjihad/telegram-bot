@@ -33,13 +33,11 @@ daily_iqd = {'date': '', 'open_price': 0}
 alerts_db = []
 user_wallets = {} 
 bot_users = set() 
-user_info_db = {} 
 whale_alert_users = {} 
 
 # حالات المحادثة
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
-ASK_INFO = 4 
 
 # --- الملصقات المميزة ---
 UP_EMOJI = '<tg-emoji emoji-id="5449683594425410231">📈</tg-emoji>'
@@ -70,8 +68,7 @@ NUM_EMOJIS = {
     3: '<tg-emoji emoji-id="5409189019261103031">3️⃣</tg-emoji>',
     4: '<tg-emoji emoji-id="5411500398861118321">4️⃣</tg-emoji>',
     5: '<tg-emoji emoji-id="5409338071806146386">5️⃣</tg-emoji>',
-    6: '<tg-emoji emoji-id="5409194048667807708">6️⃣</tg-emoji>',
-    7: '<tg-emoji emoji-id="5411284026998681990">7️⃣</tg-emoji>'
+    6: '<tg-emoji emoji-id="5409194048667807708">6️⃣</tg-emoji>'
 }
 
 # --- نظام اشعارات وتتبع المستخدمين ---
@@ -195,36 +192,6 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
     else:
         await asyncio.sleep(1.5)
         await edit_custom_msg(chat_id, msg_id, f"عنوان المحفضه خطا ! {FAIL_EMOJI}")
-    return ConversationHandler.END
-
-# --- نظام معلوماتي ---
-async def add_info_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await track_new_user(update.effective_user, context)
-    msg = ("ارسل معلوماتك بهذا الشكل:\n\n"
-           "ادرسي: XYXY\n"
-           "رقمي: 077\n"
-           "باينس: xyxy\n\n"
-           "ملاحضه: لايجب عليك الإلتزام بالاسماء يمكنك وضع اسماء خاصه")
-    await send_custom_msg(update.message.chat_id, msg)
-    return ASK_INFO
-
-async def save_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = html.escape(update.message.text)
-    user_id = update.effective_user.id
-    
-    user_info_db[user_id] = {}
-        
-    lines = text.split('\n')
-    for line in lines:
-        if ':' in line or '：' in line:
-            parts = line.split(':', 1) if ':' in line else line.split('：', 1)
-            if len(parts) == 2:
-                key = parts[0].strip()
-                val = parts[1].strip()
-                user_info_db[user_id][key] = val
-                
-    msg = f"تم الحفظ بنجاح، وتمت إزالة معلوماتك القديمة {SUCCESS_EMOJI}\nارسل 'معلوماتي' او احد الاشياء التي اضفتها لعرض المعلومات"
-    await send_custom_msg(update.message.chat_id, msg)
     return ConversationHandler.END
 
 # --- أنظمة الصرافة والأسعار ---
@@ -442,7 +409,7 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code>\n"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
 
-# --- نظام تنبيهات الحيتان (تم اصلاح خطأ الآيدي) ---
+# --- نظام تنبيهات الحيتان ---
 async def toggle_whale_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     chat_id = update.message.chat_id
@@ -476,13 +443,12 @@ async def check_whales_loop(app: Application):
                         
                         if not events: continue
                         
-                        # تحديث المنطق: نحفظ احدث ايدي قبل لا نبدي نفحص
                         new_latest_hash = events[0].get('event_id')
                         
                         for event in events:
                             tx_hash = event.get('event_id')
                             if tx_hash == last_tx_hash: 
-                                break # وصلنا للتحويلات القديمة اللي فاحصيها مسبقاً
+                                break 
                             
                             for action in event.get('actions', []):
                                 if action.get('type') == 'TonTransfer':
@@ -502,7 +468,6 @@ async def check_whales_loop(app: Application):
                                                    f"هل صعود {UP_EMOJI}؟ او نزول {DOWN_EMOJI}؟")
                                             await send_custom_msg(cid, msg)
                                             
-                        # نحدث اخر آيدي بعد ما نخلص الفحص
                         last_tx_hash = new_latest_hash
         except Exception:
             pass 
@@ -566,31 +531,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f'{NUM_EMOJIS[3]} <b>تنبيهاتي</b>: لعرض وإدارة تنبيهات الأسعار الخاصة بك {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[4]} <b>تفعيل التنبيهات</b>: لتفعيل/إلغاء وضع مراقبة حيتان TON وإرسال إشعار للتحويلات الضخمة {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[5]} <b>رصيدي</b>: لمعرفة رصيدك في المحفظة المربوطة {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير محفظة TON الخاصة بك {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[7]} <b>معلوماتي / اضافة معلومات</b>: لعرض وإدارة معلوماتك الشخصية المحفوظة {END_EMOJIS}\n'
+        msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير محفظة TON الخاصة بك {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
 
     # ميزة الحيتان
     if text == "تفعيل التنبيهات":
         await toggle_whale_alerts(update, context)
-        return
-
-    # معلوماتي
-    if text in ["معلوماتي", "/معلوماتي"]:
-        if user_id not in user_info_db or not user_info_db[user_id]:
-            msg = f"لم تقم باضافه اي معلومات {WARN_EMOJI}\nلأضافه معلومات عن نفسك اكتب <b>اضافة معلومات</b>"
-            await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
-        else:
-            msg = "معلوماتك المحفوظة:\n\n"
-            for k, v in user_info_db[user_id].items():
-                msg += f"<b>{html.escape(k)}</b>: <code>{html.escape(v)}</code>\n"
-            await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
-        return
-
-    if user_id in user_info_db and original_text in user_info_db[user_id]:
-        val = user_info_db[user_id][original_text]
-        await send_custom_msg(chat_id, f"<b>{html.escape(original_text)}</b>: <code>{html.escape(val)}</code>", reply_to_message_id=msg_id)
         return
 
     # رصيدي وتغيير المحفظة
@@ -656,12 +603,6 @@ def main():
         per_chat=True, per_user=True
     )
     
-    info_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(r'^(اضافة معلومات|اضافه معلومات|اضافه|اضافة)$'), add_info_start)],
-        states={ASK_INFO: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_user_info)]},
-        fallbacks=[], per_chat=True, per_user=True
-    )
-    
     wallet_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={ASK_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_wallet_address)]},
@@ -669,7 +610,6 @@ def main():
     )
     
     app.add_handler(alert_conv_handler)
-    app.add_handler(info_conv_handler)
     app.add_handler(wallet_conv_handler)
     
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.MY_CHAT_MEMBER))
