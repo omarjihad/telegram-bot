@@ -23,8 +23,7 @@ CACHE_TIME = 5
 last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
-crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0} # تم إزالة السعر الثابت لعملة باث لجلبها من باينس
-
+crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0.03}
 # تتبع الصعود والنزول على مدار 24 ساعة
 crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0, 'BATH': 0.0} 
 daily_iqd = {'date': '', 'open_price': 0} 
@@ -263,9 +262,6 @@ async def update_prices_if_needed():
                     elif symbol == 'TONUSDT':
                         crypto_prices['TON'] = float(item['lastPrice'])
                         crypto_24h_trend['TON'] = float(item['priceChangePercent'])
-                    elif symbol == 'BATHUSDT':
-                        crypto_prices['BATH'] = float(item['lastPrice'])
-                        crypto_24h_trend['BATH'] = float(item['priceChangePercent'])
 
             if isinstance(master_price_str, str) and master_price_str.isdigit():
                 last_known_iqd = int(master_price_str)
@@ -319,7 +315,7 @@ def generate_conversion_msg(amount, currency_str):
         usd_val = value_in_master / (last_known_iqd / 100)
     elif curr in ['باث', 'bath']:
         base, name = 'BATH', f"{BATH_EMOJI} باث (BATH)"
-        usd_val = amount * crypto_prices.get('BATH', 0)
+        usd_val = amount * 0.03
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']:
         base, name, usd_val = 'STARS', '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم', amount * 0.015 
     elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: 
@@ -333,9 +329,7 @@ def generate_conversion_msg(amount, currency_str):
     iqd_val = (usd_val * last_known_iqd) / 100
     asia_val = iqd_val / 0.9 
     ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
-    bath_val = usd_val / crypto_prices['BATH'] if crypto_prices.get('BATH') else 0
-    stars_val = usd_val / 0.015 
-    btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
+    bath_val = usd_val / 0.03
 
     msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
     if show_usd: msg += f'{USDT_CASH} بالدولار: <b>${usd_val:,.3f}</b>\n'
