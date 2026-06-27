@@ -23,10 +23,10 @@ CACHE_TIME = 5
 last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
-crypto_prices = {'BTC': 0, 'TON': 0}
+crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0.03} # تم إضافة BATH مع سعر افتراضي 0.03$
 
 # تتبع الصعود والنزول على مدار 24 ساعة
-crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0} 
+crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0, 'BATH': 0.0} 
 daily_iqd = {'date': '', 'open_price': 0} 
 
 # قواعد البيانات (في الذاكرة)
@@ -46,6 +46,9 @@ WHALE_BELL = '<tg-emoji emoji-id="5215372534060428125">🔔</tg-emoji>'
 WHALE_EMOJI = '<tg-emoji emoji-id="5461151367559141950">🐋</tg-emoji>'
 ASIA_EMOJI = '<tg-emoji emoji-id="5183779703818814840">🔴</tg-emoji>'
 MASTER_EMOJI = '<tg-emoji emoji-id="5812036009365343919">💳</tg-emoji>'
+GRAM_EMOJI = '<tg-emoji emoji-id="5300919220215780911">💎</tg-emoji>' # ملصق جرام الجديد
+BATH_EMOJI = '<tg-emoji emoji-id="5330015905659264283">🛁</tg-emoji>' # ملصق باث الجديد
+FOOL_EMOJI = '<tg-emoji emoji-id="5841545015964209734">😂</tg-emoji>' # ملصق الرد التحشيشي
 
 # ملصقات عامة تم إضافتها للنصوص
 CLIPBOARD_EMOJI = '<tg-emoji emoji-id="5800769433974611462">📋</tg-emoji>'
@@ -57,7 +60,6 @@ SEARCH_EMOJI = '<tg-emoji emoji-id="5411597774359653692">🔍</tg-emoji>'
 WAIT_EMOJI = '<tg-emoji emoji-id="5215484787325676090">⏳</tg-emoji>'
 SUCCESS_EMOJI = '<tg-emoji emoji-id="5215492745900077682">✅</tg-emoji>'
 FAIL_EMOJI = '<tg-emoji emoji-id="5215204871422093648">❌</tg-emoji>'
-TON_GEM = '<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji>'
 USDT_CASH = '<tg-emoji emoji-id="5213170203680060059">💵</tg-emoji>'
 HELLO_EMOJI = '<tg-emoji emoji-id="5800769433974611462">👋</tg-emoji>'
 
@@ -75,7 +77,6 @@ NUM_EMOJIS = {
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in bot_users:
         bot_users.add(user.id)
-        # تم مسح كود إشعار الأدمن لدخول مستخدم جديد حسب طلبك.
 
 async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.my_chat_member
@@ -87,14 +88,10 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
         except: pass
         
         admin_msg = f"{WHALE_BELL} <b>تم إضافة البوت إلى مجموعة جديدة!</b>\nالاسم: {html.escape(chat.title)}\nالآيدي: <code>{chat.id}</code>"
-        
-        if chat.username:
-            admin_msg += f"\nالرابط: https://t.me/{chat.username}"
-        else:
-            admin_msg += f"\nالرابط: <i>مجموعة خاصة (لا يوجد رابط عام)</i>"
+        if chat.username: admin_msg += f"\nالرابط: https://t.me/{chat.username}"
+        else: admin_msg += f"\nالرابط: <i>مجموعة خاصة (لا يوجد رابط عام)</i>"
             
-        try:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode="HTML")
+        try: await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode="HTML")
         except: pass
 
 # --- دالة الإرسال الشاملة ---
@@ -200,9 +197,10 @@ def normalize_currency(curr_str):
     if curr in ['دولار', 'usdt', 'usd']: return 'USD'
     elif curr in ['ماستر', 'master']: return 'IQD'
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: return 'STARS'
-    elif curr in ['تون', 'ton']: return 'TON'
+    elif curr in ['جرام', 'gram']: return 'TON' # برمجياً يبقى TON للربط مع API باينس
     elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: return 'BTC'
     elif curr in ['اسيا', 'آسيا', 'asia']: return 'ASIA'
+    elif curr in ['باث', 'bath']: return 'BATH'
     return None
 
 def get_current_price(curr_code):
@@ -213,7 +211,7 @@ def get_current_price(curr_code):
     return 0
 
 def get_daily_trend_emoji(currency, current_price=None):
-    if currency in ['BTC', 'TON']:
+    if currency in ['BTC', 'TON', 'BATH']:
         change = crypto_24h_trend.get(currency, 0.0)
         if change > 0: return UP_EMOJI
         elif change < 0: return DOWN_EMOJI
@@ -249,7 +247,8 @@ async def update_prices_if_needed():
         
     try:
         async with aiohttp.ClientSession() as session:
-            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","TONUSDT"]'
+            # تم جلب كل العملات حتى إذا BATH ماكو ما يصير خطأ ونستخدم قيمتها الافتراضية
+            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr'
             crypto_task = session.get(crypto_url, timeout=10)
             master_task = fetch_mastercard_price(session)
             
@@ -265,6 +264,9 @@ async def update_prices_if_needed():
                     elif symbol == 'TONUSDT':
                         crypto_prices['TON'] = float(item['lastPrice'])
                         crypto_24h_trend['TON'] = float(item['priceChangePercent'])
+                    elif symbol == 'BATHUSDT':
+                        crypto_prices['BATH'] = float(item['lastPrice'])
+                        crypto_24h_trend['BATH'] = float(item['priceChangePercent'])
 
             if isinstance(master_price_str, str) and master_price_str.isdigit():
                 last_known_iqd = int(master_price_str)
@@ -274,11 +276,13 @@ async def update_prices_if_needed():
                 daily_iqd['date'] = today_str
                 daily_iqd['open_price'] = last_known_iqd
 
-            btc_int = int(crypto_prices['BTC'])
-            ton_val = crypto_prices['TON']
+            btc_int = int(crypto_prices.get('BTC', 0))
+            ton_val = crypto_prices.get('TON', 0)
+            bath_val = crypto_prices.get('BATH', 0.03) # السعر الافتراضي للباث
             
             btc_trend = get_daily_trend_emoji('BTC')
             ton_trend = get_daily_trend_emoji('TON')
+            bath_trend = get_daily_trend_emoji('BATH')
             iqd_trend = get_daily_trend_emoji('IQD', last_known_iqd)
             
             asia_price_for_100_usd = int(last_known_iqd / 0.9)
@@ -288,7 +292,8 @@ async def update_prices_if_needed():
                    f'{ASIA_EMOJI} اسيا (100$): <b>{asia_price_for_100_usd:,}</b> دينار\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                    f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc_int:,}</b> {btc_trend}\n'
-                   f'<tg-emoji emoji-id="5321330914851040564">💎</tg-emoji> TON: <b>${ton_val:,.2f}</b> {ton_trend}\n'
+                   f'{GRAM_EMOJI} GRAM: <b>${ton_val:,.2f}</b> {ton_trend}\n'
+                   f'{BATH_EMOJI} BATH: <b>${bath_val:,.4f}</b> {bath_trend}\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                    f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية والمحلية</i>\n'
                    f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>')
@@ -313,10 +318,13 @@ def generate_conversion_msg(amount, currency_str):
         actual_asia = amount * 1000 if amount < 100000 else amount
         value_in_master = actual_asia * 0.9
         usd_val = value_in_master / (last_known_iqd / 100)
+    elif curr in ['باث', 'bath']:
+        base, name = 'BATH', f"{BATH_EMOJI} باث (BATH)"
+        usd_val = amount * crypto_prices.get('BATH', 0.03)
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']:
         base, name, usd_val = 'STARS', '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم', amount * 0.015 
-    elif curr in ['تون', 'ton']: 
-        base, name, usd_val = 'TON', "تون (TON)", amount * crypto_prices.get('TON', 0)
+    elif curr in ['جرام', 'gram']: 
+        base, name, usd_val = 'TON', "جرام (GRAM)", amount * crypto_prices.get('TON', 0)
     elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: 
         base, name, usd_val = 'BTC', "بتكوين (BTC)", amount * crypto_prices.get('BTC', 0)
     else: return f"عذراً، العملة غير مدعومة. {WARN_EMOJI}"
@@ -326,6 +334,7 @@ def generate_conversion_msg(amount, currency_str):
     iqd_val = (usd_val * last_known_iqd) / 100
     asia_val = iqd_val / 0.9 
     ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
+    bath_val = usd_val / crypto_prices.get('BATH', 0.03)
     stars_val = usd_val / 0.015 
     btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
 
@@ -334,7 +343,8 @@ def generate_conversion_msg(amount, currency_str):
     if show_iqd: msg += f'{MASTER_EMOJI} بالماستر: <b>{iqd_val:,.0f}</b> IQD\n'
     if base != 'ASIA': msg += f'{ASIA_EMOJI} بالاسيا: <b>{asia_val:,.0f}</b> دينار\n'
     msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-    if base != 'TON' and ton_val > 0: msg += f'{TON_GEM} تون: <b>{ton_val:,.2f}</b> TON\n'
+    if base != 'TON' and ton_val > 0: msg += f'{GRAM_EMOJI} جرام: <b>{ton_val:,.2f}</b> GRAM\n'
+    if base != 'BATH' and bath_val > 0: msg += f'{BATH_EMOJI} باث: <b>{bath_val:,.0f}</b> BATH\n'
     if base != 'STARS' and stars_val > 0: msg += f'<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم: <b>{stars_val:,.0f}</b> Stars\n'
     if base != 'STARS' and base != 'BTC' and btc_val > 0: 
         msg += f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> بتكوين: <b>{btc_val:,.6f}</b> BTC\n'
@@ -344,13 +354,20 @@ def generate_conversion_msg(amount, currency_str):
 
 # --- نظام التنبيهات (الأسعار) ---
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = f"{WHALE_BELL} <b>نظام التنبيهات الذكي</b>\n\nاكتب اسم العملة اللي تريد أراقبها (مثال: تون، بتكوين، ماستر...):"
+    msg = f"{WHALE_BELL} <b>نظام التنبيهات الذكي</b>\n\nاكتب اسم العملة اللي تريد أراقبها (مثال: جرام، بتكوين، باث، ماستر...):"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
     return ASK_CURRENCY
 
 async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     curr_input = html.escape(update.message.text.strip())
     if curr_input.startswith('/ايقاف') or curr_input == 'ايقاف': return await stop_alerts(update, context)
+    
+    # الرد التحشيشي لكلمة تون في التنبيهات
+    if "تون" in curr_input.lower() or "ton" in curr_input.lower():
+        msg = f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}"
+        await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
+        return ASK_CURRENCY
+
     curr_code = normalize_currency(curr_input)
     if not curr_code:
         await send_custom_msg(update.message.chat_id, f"عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح: {WARN_EMOJI}", update.message.message_id)
@@ -378,14 +395,17 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current_price == 0:
         await send_custom_msg(update.message.chat_id, f"عذراً، لا يمكن جلب السعر الحالي، حاول لاحقاً. {WARN_EMOJI}", update.message.message_id)
         return ConversationHandler.END
-    if target_price == current_price:
-        await send_custom_msg(update.message.chat_id, f"الـ {curr_name} أصلاً واصل هذا السعر بالضبط! {WARN_EMOJI}", update.message.message_id)
+        
+    if round(target_price, 4) == round(current_price, 4):
+        await send_custom_msg(update.message.chat_id, f"الـ {curr_name} أصلاً واصل هذا السعر بالضبط! {WARN_EMOJI}\nالسعر الحالي هو: {current_price:g}", update.message.message_id)
         return ConversationHandler.END
         
     direction = 'up' if target_price > current_price else 'down'
     alerts_db.append({'user_id': update.message.from_user.id, 'name': safe_name, 'chat_id': update.message.chat_id, 'currency': curr_code, 'curr_name': curr_name, 'target': target_price, 'direction': direction, 'active': True})
     
-    msg = (f"{SUCCESS_EMOJI} <b>تم التفعيل!</b>\nسيتم تنبيهك عند وصول الـ {curr_name} إلى <code>{target_price:g}</code>\n\nلإيقاف التنبيه ارسل /ايقاف")
+    dir_txt = "صعود 📈" if direction == 'up' else "نزول 📉"
+    msg = (f"{SUCCESS_EMOJI} <b>تم التفعيل!</b>\nسيتم تنبيهك عند {dir_txt} الـ {curr_name} إلى <code>{target_price:g}</code>\n"
+           f"(علماً أن السعر الحالي هو: <b>{current_price:g}</b>)\n\nلإيقاف التنبيه ارسل /ايقاف")
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
     return ConversationHandler.END
 
@@ -406,7 +426,8 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = f"{WHALE_BELL} <b>تنبيهاتك الحالية:</b>\n\n"
     for idx, a in enumerate(user_alerts, 1):
-        msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code>\n"
+        dir_txt = "صعود " + UP_EMOJI if a['direction'] == 'up' else "نزول " + DOWN_EMOJI
+        msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code> ({dir_txt})\n"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
 
 # --- نظام تنبيهات الحيتان ---
@@ -422,7 +443,7 @@ async def toggle_whale_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE
         whale_alert_users[user_id] = {"name": safe_name, "chat_id": chat_id}
         msg = (f"{SUCCESS_EMOJI} <b>تم تفعيل تنبيهات الحيتان بنجاح!</b>\n\n"
                "<b>الفائدة من هذا الوضع:</b>\n"
-               "البوت سيقوم بمراقبة شبكة عملة TON، وعند حدوث عملية تحويل ضخمة جداً (أكثر من 8000 تون)، "
+               "البوت سيقوم بمراقبة شبكة عملة الجرام (TON)، وعند حدوث عملية تحويل ضخمة جداً (أكثر من 8000 جرام)، "
                "سيصلك إشعار فوري. هذه الحركات الكبيرة تؤثر عادةً على السعر وتساعدك في اتخاذ قرارات الشراء أو البيع في الوقت المناسب.")
         await send_custom_msg(chat_id, msg, update.message.message_id)
 
@@ -434,7 +455,7 @@ async def check_whales_loop(app: Application):
         
         try:
             wallet = "EQBX63RAdgShnrJGptNINn2uUFIqEQ9_hD0z4E7h-gH-Zk5t" 
-            url = f"https://tonapi.io/v2/accounts/{wallet}/events?limit=5"
+            url = f"https://tonapi.io/v2/accounts/{wallet}/events?limit=10"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as resp:
                     if resp.status == 200:
@@ -443,8 +464,12 @@ async def check_whales_loop(app: Application):
                         
                         if not events: continue
                         
+                        # تحديث المنطق لضمان عدم تفويت الإشعارات
                         new_latest_hash = events[0].get('event_id')
-                        
+                        if last_tx_hash == "":
+                            last_tx_hash = new_latest_hash
+                            continue
+                            
                         for event in events:
                             tx_hash = event.get('event_id')
                             if tx_hash == last_tx_hash: 
@@ -464,19 +489,19 @@ async def check_whales_loop(app: Application):
                                         for cid, users in grouped_by_chat.items():
                                             mentions = " ".join([f"<a href='tg://user?id={u['id']}'>{u['name']}</a>" for u in users])
                                             msg = (f"يا : {mentions} {WHALE_BELL}\n\n"
-                                                   f"حصلت عملية تحويل بقيمه {amount:,.0f} تون {WHALE_EMOJI}\n\n"
+                                                   f"حصلت عملية تحويل بقيمه {amount:,.0f} جرام {WHALE_EMOJI}\n\n"
                                                    f"هل صعود {UP_EMOJI}؟ او نزول {DOWN_EMOJI}؟")
                                             await send_custom_msg(cid, msg)
                                             
                         last_tx_hash = new_latest_hash
-        except Exception:
+        except Exception as e:
             pass 
 
 # --- اللوب الرئيسي لتنبيهات الأسعار ---
 async def check_alerts_loop(app: Application):
     global alerts_db 
     while True:
-        await asyncio.sleep(10) 
+        await asyncio.sleep(8) # تسريع فحص التنبيهات
         if not alerts_db: continue
         if not await update_prices_if_needed(): continue
         
@@ -522,16 +547,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word in text for word in forbidden): return
+    
+    # الرد التحشيشي لأي شخص يكتب تون بدل جرام
+    if re.search(r'\b(تون|ton)\b', text) or "تون" in text or "ton" in text:
+        msg = f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}"
+        await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
+        return
 
     # الأوامر والقائمة
     if text in ["الاوامر", "اوامر"]:
         msg = f"اهلا بك في قائمه اوامر البوت {CLIPBOARD_EMOJI}\n\n"
-        msg += f'{NUM_EMOJIS[1]} <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات مباشرة (دولار، ماستر، تون، بتكوين، اسيا، نجوم) {END_EMOJIS}\n\n'
+        msg += f'{NUM_EMOJIS[1]} <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات مباشرة (دولار، ماستر، جرام، بتكوين، اسيا، نجوم، باث) {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[2]} <b>نبهني</b>: لمراقبة سعر عملة معينة وتنبيهك عند وصولها للهدف {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[3]} <b>تنبيهاتي</b>: لعرض وإدارة تنبيهات الأسعار الخاصة بك {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[4]} <b>تفعيل التنبيهات</b>: لتفعيل/إلغاء وضع مراقبة حيتان TON وإرسال إشعار للتحويلات الضخمة {END_EMOJIS}\n\n'
+        msg += f'{NUM_EMOJIS[4]} <b>تفعيل التنبيهات</b>: لتفعيل/إلغاء وضع مراقبة حيتان GRAM وإرسال إشعار للتحويلات الضخمة {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[5]} <b>رصيدي</b>: لمعرفة رصيدك في المحفظة المربوطة {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير محفظة TON الخاصة بك {END_EMOJIS}\n'
+        msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير محفظة GRAM الخاصة بك {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
 
@@ -549,7 +580,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             is_valid, ton_bal, usdt_bal = await check_ton_wallet(user_wallets[user_id])
             if is_valid:
-                await send_custom_msg(chat_id, f"الان لديك :\nTON {TON_GEM}: {ton_bal:.2f}\nUSDT {USDT_CASH}: {usdt_bal:.2f}", reply_to_message_id=msg_id)
+                await send_custom_msg(chat_id, f"الان لديك :\nGRAM {GRAM_EMOJI}: {ton_bal:.2f}\nUSDT {USDT_CASH}: {usdt_bal:.2f}", reply_to_message_id=msg_id)
             else:
                 await send_custom_msg(chat_id, f"عذراً، مشكلة في محفظتك المربوطة. {WARN_EMOJI}", reply_to_message_id=msg_id)
         return
@@ -559,16 +590,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
-    # الصرافة الحاسبة - تم تشديد البحث ليكون فقط للرقم واسم العملة حصراً
-    calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(تون|ton|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|نجمه|نجمة|نجوم|star|stars|نج)\s*$', text)
+    # الصرافة الحاسبة - تم تحديث نظام البحث لدعم (اسيا، asia، باث، bath، جرام، gram) وحل مشكلة المسافات
+    calc_match = re.search(r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(جرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)', text)
     if calc_match:
         await update_prices_if_needed()
         reply = generate_conversion_msg(float(calc_match.group(1)), calc_match.group(2))
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
         return
 
-    # جلب الأسعار - تم تقييد الكلمات حتى البوت ما يرد بشكل عشوائي
-    exact_price_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "تون", "btc", "ton", "ماستر", "نجوم", "نجمة", "نج", "اسيا", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]
+    # جلب الأسعار العامة
+    exact_price_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "جرام", "btc", "gram", "ماستر", "نجوم", "نجمة", "نج", "اسيا", "باث", "bath", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]
     if text in exact_price_keywords:
         await update_prices_if_needed()
         reply = cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}"
