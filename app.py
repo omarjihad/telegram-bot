@@ -14,6 +14,7 @@ from telegram.request import HTTPXRequest
 
 # إعدادات اللوج
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 TOKEN = '8679057078:AAH27klAkXPLu9bWVr-_jhmg06gdYvefVps'
 ADMIN_ID = 7126816492 # آيدي حسابك ليوصلك الاشعارات
@@ -23,7 +24,8 @@ CACHE_TIME = 5
 last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
-crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0.03}
+crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0.03} 
+
 # تتبع الصعود والنزول على مدار 24 ساعة
 crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0, 'BATH': 0.0} 
 daily_iqd = {'date': '', 'open_price': 0} 
@@ -246,8 +248,9 @@ async def update_prices_if_needed():
         
     try:
         async with aiohttp.ClientSession() as session:
-            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr'
-            crypto_task = session.get(crypto_url, timeout=10)
+            # FIX: تحديد الرموز لمنع البلوك من باينس ولتسريع الاستجابة
+            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","TONUSDT"]'
+            crypto_task = session.get(crypto_url, timeout=6)
             master_task = fetch_mastercard_price(session)
             
             response, master_price_str = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
@@ -263,6 +266,19 @@ async def update_prices_if_needed():
                         crypto_prices['TON'] = float(item['lastPrice'])
                         crypto_24h_trend['TON'] = float(item['priceChangePercent'])
 
+            # جلب الباث بشكل منفصل وآمن (اذا ما لگاه يستخدم السعر الافتراضي وما يطفي البوت)
+            try:
+                bath_url = 'https://api.binance.com/api/v3/ticker/24hr?symbol=BATHUSDT'
+                async with session.get(bath_url, timeout=3) as bath_resp:
+                    if bath_resp.status == 200:
+                        bath_data = await bath_resp.json()
+                        crypto_prices['BATH'] = float(bath_data['lastPrice'])
+                        crypto_24h_trend['BATH'] = float(bath_data['priceChangePercent'])
+                    else:
+                        crypto_prices['BATH'] = 0.03
+            except:
+                crypto_prices['BATH'] = 0.03
+
             if isinstance(master_price_str, str) and master_price_str.isdigit():
                 last_known_iqd = int(master_price_str)
                 
@@ -273,7 +289,7 @@ async def update_prices_if_needed():
 
             btc_int = int(crypto_prices.get('BTC', 0))
             ton_val = crypto_prices.get('TON', 0)
-            bath_val = crypto_prices.get('BATH', 0) 
+            bath_val = crypto_prices.get('BATH', 0.03)
             
             btc_trend = get_daily_trend_emoji('BTC')
             ton_trend = get_daily_trend_emoji('TON')
@@ -315,7 +331,7 @@ def generate_conversion_msg(amount, currency_str):
         usd_val = value_in_master / (last_known_iqd / 100)
     elif curr in ['باث', 'bath']:
         base, name = 'BATH', f"{BATH_EMOJI} باث (BATH)"
-        usd_val = amount * 0.03
+        usd_val = amount * crypto_prices.get('BATH', 0.03)
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']:
         base, name, usd_val = 'STARS', '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم', amount * 0.015 
     elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: 
@@ -329,7 +345,9 @@ def generate_conversion_msg(amount, currency_str):
     iqd_val = (usd_val * last_known_iqd) / 100
     asia_val = iqd_val / 0.9 
     ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
-    bath_val = usd_val / 0.03
+    bath_val = usd_val / crypto_prices.get('BATH', 0.03)
+    stars_val = usd_val / 0.015 
+    btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
 
     msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
     if show_usd: msg += f'{USDT_CASH} بالدولار: <b>${usd_val:,.3f}</b>\n'
@@ -355,7 +373,7 @@ async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     curr_input = html.escape(update.message.text.strip())
     if curr_input.startswith('/ايقاف') or curr_input == 'ايقاف': return await stop_alerts(update, context)
     
-    if "تون" in curr_input.lower() or "ton" in curr_input.lower():
+    if re.search(r'(^|\s)(تون|ton)(\s|$)', curr_input.lower()):
         msg = f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}"
         await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
         return ASK_CURRENCY
@@ -539,7 +557,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word in text for word in forbidden): return
 
-    if re.search(r'\b(تون|ton)\b', text) or "تون" in text or "ton" in text:
+    # FIX: التون المعزول فقط يترزل، حتى كلمة (بتكوين) تعبر بسلام
+    if re.search(r'(^|\s)(تون|ton)(\s|$)', text):
         msg = f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}"
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
@@ -577,7 +596,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
-    calc_match = re.search(r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)', text)
+    # FIX: إرجاع نظام التوافق الصارم (re.match) حتى يرد فقط على الأوامر الصافية (مثل 1 جرام) وميتداخل وية السوالف
+    calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)\s*$', text)
     if calc_match:
         await update_prices_if_needed()
         reply = generate_conversion_msg(float(calc_match.group(1)), calc_match.group(2))
