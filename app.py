@@ -23,7 +23,7 @@ CACHE_TIME = 5
 last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
-crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0.03} # تم إضافة BATH مع سعر افتراضي 0.03$
+crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0} # تم إزالة السعر الثابت لعملة باث لجلبها من باينس
 
 # تتبع الصعود والنزول على مدار 24 ساعة
 crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0, 'BATH': 0.0} 
@@ -46,9 +46,9 @@ WHALE_BELL = '<tg-emoji emoji-id="5215372534060428125">🔔</tg-emoji>'
 WHALE_EMOJI = '<tg-emoji emoji-id="5461151367559141950">🐋</tg-emoji>'
 ASIA_EMOJI = '<tg-emoji emoji-id="5183779703818814840">🔴</tg-emoji>'
 MASTER_EMOJI = '<tg-emoji emoji-id="5812036009365343919">💳</tg-emoji>'
-GRAM_EMOJI = '<tg-emoji emoji-id="5300919220215780911">💎</tg-emoji>' # ملصق جرام الجديد
-BATH_EMOJI = '<tg-emoji emoji-id="5330015905659264283">🛁</tg-emoji>' # ملصق باث الجديد
-FOOL_EMOJI = '<tg-emoji emoji-id="5841545015964209734">😂</tg-emoji>' # ملصق الرد التحشيشي
+GRAM_EMOJI = '<tg-emoji emoji-id="5300919220215780911">💎</tg-emoji>' 
+BATH_EMOJI = '<tg-emoji emoji-id="5330015905659264283">🛁</tg-emoji>' 
+FOOL_EMOJI = '<tg-emoji emoji-id="5841545015964209734">😂</tg-emoji>' 
 
 # ملصقات عامة تم إضافتها للنصوص
 CLIPBOARD_EMOJI = '<tg-emoji emoji-id="5800769433974611462">📋</tg-emoji>'
@@ -197,7 +197,7 @@ def normalize_currency(curr_str):
     if curr in ['دولار', 'usdt', 'usd']: return 'USD'
     elif curr in ['ماستر', 'master']: return 'IQD'
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: return 'STARS'
-    elif curr in ['جرام', 'gram']: return 'TON' # برمجياً يبقى TON للربط مع API باينس
+    elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: return 'TON' 
     elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: return 'BTC'
     elif curr in ['اسيا', 'آسيا', 'asia']: return 'ASIA'
     elif curr in ['باث', 'bath']: return 'BATH'
@@ -247,7 +247,6 @@ async def update_prices_if_needed():
         
     try:
         async with aiohttp.ClientSession() as session:
-            # تم جلب كل العملات حتى إذا BATH ماكو ما يصير خطأ ونستخدم قيمتها الافتراضية
             crypto_url = 'https://api.binance.com/api/v3/ticker/24hr'
             crypto_task = session.get(crypto_url, timeout=10)
             master_task = fetch_mastercard_price(session)
@@ -278,7 +277,7 @@ async def update_prices_if_needed():
 
             btc_int = int(crypto_prices.get('BTC', 0))
             ton_val = crypto_prices.get('TON', 0)
-            bath_val = crypto_prices.get('BATH', 0.03) # السعر الافتراضي للباث
+            bath_val = crypto_prices.get('BATH', 0) 
             
             btc_trend = get_daily_trend_emoji('BTC')
             ton_trend = get_daily_trend_emoji('TON')
@@ -320,10 +319,10 @@ def generate_conversion_msg(amount, currency_str):
         usd_val = value_in_master / (last_known_iqd / 100)
     elif curr in ['باث', 'bath']:
         base, name = 'BATH', f"{BATH_EMOJI} باث (BATH)"
-        usd_val = amount * crypto_prices.get('BATH', 0.03)
+        usd_val = amount * crypto_prices.get('BATH', 0)
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']:
         base, name, usd_val = 'STARS', '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم', amount * 0.015 
-    elif curr in ['جرام', 'gram']: 
+    elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: 
         base, name, usd_val = 'TON', "جرام (GRAM)", amount * crypto_prices.get('TON', 0)
     elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: 
         base, name, usd_val = 'BTC', "بتكوين (BTC)", amount * crypto_prices.get('BTC', 0)
@@ -334,7 +333,7 @@ def generate_conversion_msg(amount, currency_str):
     iqd_val = (usd_val * last_known_iqd) / 100
     asia_val = iqd_val / 0.9 
     ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
-    bath_val = usd_val / crypto_prices.get('BATH', 0.03)
+    bath_val = usd_val / crypto_prices['BATH'] if crypto_prices.get('BATH') else 0
     stars_val = usd_val / 0.015 
     btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
 
@@ -362,7 +361,6 @@ async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     curr_input = html.escape(update.message.text.strip())
     if curr_input.startswith('/ايقاف') or curr_input == 'ايقاف': return await stop_alerts(update, context)
     
-    # الرد التحشيشي لكلمة تون في التنبيهات
     if "تون" in curr_input.lower() or "ton" in curr_input.lower():
         msg = f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}"
         await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
@@ -464,7 +462,6 @@ async def check_whales_loop(app: Application):
                         
                         if not events: continue
                         
-                        # تحديث المنطق لضمان عدم تفويت الإشعارات
                         new_latest_hash = events[0].get('event_id')
                         if last_tx_hash == "":
                             last_tx_hash = new_latest_hash
@@ -494,14 +491,14 @@ async def check_whales_loop(app: Application):
                                             await send_custom_msg(cid, msg)
                                             
                         last_tx_hash = new_latest_hash
-        except Exception as e:
+        except Exception:
             pass 
 
 # --- اللوب الرئيسي لتنبيهات الأسعار ---
 async def check_alerts_loop(app: Application):
     global alerts_db 
     while True:
-        await asyncio.sleep(8) # تسريع فحص التنبيهات
+        await asyncio.sleep(8) 
         if not alerts_db: continue
         if not await update_prices_if_needed(): continue
         
@@ -547,14 +544,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word in text for word in forbidden): return
-    
-    # الرد التحشيشي لأي شخص يكتب تون بدل جرام
+
     if re.search(r'\b(تون|ton)\b', text) or "تون" in text or "ton" in text:
         msg = f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}"
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
 
-    # الأوامر والقائمة
     if text in ["الاوامر", "اوامر"]:
         msg = f"اهلا بك في قائمه اوامر البوت {CLIPBOARD_EMOJI}\n\n"
         msg += f'{NUM_EMOJIS[1]} <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات مباشرة (دولار، ماستر، جرام، بتكوين، اسيا، نجوم، باث) {END_EMOJIS}\n\n'
@@ -566,12 +561,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
 
-    # ميزة الحيتان
     if text == "تفعيل التنبيهات":
         await toggle_whale_alerts(update, context)
         return
 
-    # رصيدي وتغيير المحفظة
     if text in ["رصيدي", "/رصيدي", "رص", "/رص"]:
         if user_id not in user_wallets:
             msg = f"لم تقم بربط محفضتك بالبوت {WARN_EMOJI}"
@@ -590,16 +583,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
-    # الصرافة الحاسبة - تم تحديث نظام البحث لدعم (اسيا، asia، باث، bath، جرام، gram) وحل مشكلة المسافات
-    calc_match = re.search(r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(جرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)', text)
+    calc_match = re.search(r'(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)', text)
     if calc_match:
         await update_prices_if_needed()
         reply = generate_conversion_msg(float(calc_match.group(1)), calc_match.group(2))
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
         return
 
-    # جلب الأسعار العامة
-    exact_price_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "جرام", "btc", "gram", "ماستر", "نجوم", "نجمة", "نج", "اسيا", "باث", "bath", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]
+    exact_price_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "جرام", "غرام", "كرام", "قرام", "btc", "gram", "ماستر", "نجوم", "نجمة", "نج", "اسيا", "باث", "bath", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]
     if text in exact_price_keywords:
         await update_prices_if_needed()
         reply = cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}"
@@ -617,7 +608,6 @@ def run_web():
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
-    time.sleep(8)
 
     t_request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, write_timeout=60.0)
 
