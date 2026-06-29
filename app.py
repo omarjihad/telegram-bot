@@ -2,6 +2,14 @@ import os
 import time
 import aiohttp
 import logging
+
+# قم برفع مستوى تسجيل مكتبة httpx إلى WARNING
+# هذا سيخفي الـ INFO التي تحتوي على الروابط والتوكنات
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+# إذا كنت تريد التأكد أيضاً من مكتبة التلجرام نفسها:
+logging.getLogger("telegram").setLevel(logging.WARNING)
+
 import threading
 import asyncio
 import re
