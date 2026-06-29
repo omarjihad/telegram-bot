@@ -17,7 +17,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 
-BOT_TOKEN     = os.environ.get('BOT_TOKEN')
+TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 7126816492 # آيدي حسابك ليوصلك الاشعارات
 
 # نظام الكاش والبيانات
