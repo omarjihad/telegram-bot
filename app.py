@@ -16,7 +16,8 @@ from telegram.request import HTTPXRequest
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-TOKEN = '8679057078:AAH27klAkXPLu9bWVr-_jhmg06gdYvefVps'
+
+BOT_TOKEN     = os.environ.get('BOT_TOKEN')
 ADMIN_ID = 7126816492 # آيدي حسابك ليوصلك الاشعارات
 
 # نظام الكاش والبيانات
