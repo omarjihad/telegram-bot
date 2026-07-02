@@ -1,4 +1,4 @@
-import os
+ import os
 import time
 import aiohttp
 import logging
@@ -258,7 +258,7 @@ async def update_prices_if_needed():
     try:
         async with aiohttp.ClientSession() as session:
             # FIX: تحديد الرموز لمنع البلوك من باينس ولتسريع الاستجابة
-            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","TONUSDT"]'
+            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","GRAMUSDT"]'
             crypto_task = session.get(crypto_url, timeout=6)
             master_task = fetch_mastercard_price(session)
             
@@ -271,7 +271,7 @@ async def update_prices_if_needed():
                     if symbol == 'BTCUSDT':
                         crypto_prices['BTC'] = float(item['lastPrice'])
                         crypto_24h_trend['BTC'] = float(item['priceChangePercent'])
-                    elif symbol == 'TONUSDT':
+                    elif symbol == 'GRAMUSDT':
                         crypto_prices['TON'] = float(item['lastPrice'])
                         crypto_24h_trend['TON'] = float(item['priceChangePercent'])
 
