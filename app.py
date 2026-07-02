@@ -25,7 +25,8 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
+
 ADMIN_ID = 7126816492 # آيدي حسابك ليوصلك الاشعارات
 
 # نظام الكاش والبيانات
@@ -33,10 +34,10 @@ CACHE_TIME = 5
 last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
-crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0.03} 
+crypto_prices = {'BTC': 0, 'GRAM': 0, 'BATH': 0.03} 
 
 # تتبع الصعود والنزول على مدار 24 ساعة
-crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0, 'BATH': 0.0} 
+crypto_24h_trend = {'BTC': 0.0, 'GRAM': 0.0, 'BATH': 0.0} 
 daily_iqd = {'date': '', 'open_price': 0} 
 
 # قواعد البيانات (في الذاكرة)
