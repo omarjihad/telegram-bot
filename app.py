@@ -565,7 +565,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_new_user(update.effective_user, context)
 
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
-    if any(word in text for word in forbidden): return
+    if any(word in text.split() for word in forbidden): return
 
     # FIX: التون المعزول فقط يترزل، حتى كلمة (بتكوين) تعبر بسلام
     if re.search(r'(^|\s)(تون|ton)(\s|$)', text):
@@ -601,6 +601,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_custom_msg(chat_id, f"عذراً، مشكلة في محفظتك المربوطة. {WARN_EMOJI}", reply_to_message_id=msg_id)
         return
         
+    if text in ["رصيده", "/رصيده"]:
+        if update.message.reply_to_message:
+            target_user = update.message.reply_to_message.from_user
+            target_id = target_user.id
+            target_name = html.escape(target_user.first_name)
+            
+            if target_id not in user_wallets:
+                msg = f"المستخدم <b>{target_name}</b> لم يقم بربط محفظته بالبوت {WARN_EMOJI}"
+                await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
+            else:
+                is_valid, ton_bal, usdt_bal = await check_ton_wallet(user_wallets[target_id])
+                if is_valid:
+                    await send_custom_msg(chat_id, f"الان رصيد {target_name} هو :\nGRAM {GRAM_EMOJI}: {ton_bal:.2f}\nUSDT {USDT_CASH}: {usdt_bal:.2f}", reply_to_message_id=msg_id)
+                else:
+                    await send_custom_msg(chat_id, f"عذراً، مشكلة في محفظة {target_name} المربوطة. {WARN_EMOJI}", reply_to_message_id=msg_id)
+        else:
+            await send_custom_msg(chat_id, f"يرجى الرد على رسالة الشخص لمعرفة رصيده {WARN_EMOJI}", reply_to_message_id=msg_id)
+        return
+
     if text in ["تغيير محفظتي", "/تغيير محفظتي", "تغيير محفضتي", "/تغيير محفضتي"]:
         btn = [[{"text": "تغيير محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
         await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=btn)
