@@ -13,6 +13,7 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, filters, ContextTypes, ChatMemberHandler
 from telegram.request import HTTPXRequest
+import urllib.parse
 
 # إخفاء اللوجات المزعجة
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -40,15 +41,15 @@ whale_alert_users = {}
 
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
+ASK_GIFT_SEARCH = 4 # حالة جديدة للبحث عن هدية
 
 # --- متغيرات Tonnel Marketplace ---
 WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
-# قاموس لحفظ أسعار جميع الهدايا المعروضة (gift_id -> price)
 active_listings = {}
 
 gift_floor = {
     "price": 0.0, 
-    "url": "https://tonnel.network", # رابط افتراضي
+    "url": "https://t.me/tonnel_network_bot/marketplace", # رابط افتراضي يفتح الماركت
     "name": "جاري التحديث..."
 }
 
@@ -93,19 +94,18 @@ async def update_lowest_floor():
     if not active_listings:
         return
         
-    # البحث عن أقل سعر في القاموس
     lowest_gift_id = min(active_listings, key=lambda k: active_listings[k]['price'])
     lowest_data = active_listings[lowest_gift_id]
     
-    # تحديث المتغير العام اللي ينعرض للمستخدمين
     gift_floor['price'] = lowest_data['price']
     gift_floor['name'] = lowest_data['name']
-    gift_floor['url'] = f"https://tonnel.network/gift/{lowest_gift_id}" # الرابط الافتراضي للهدية
+    
+    # إصلاح الرابط: التوجيه مباشرة إلى الهدية المعروضة داخل الماركت (Mini App)
+    gift_floor['url'] = f"https://t.me/tonnel_network_bot/marketplace?startapp=item-{lowest_gift_id}"
 
 async def tonnel_websocket_loop():
     global active_listings
     
-    # جلب مبدئي للبيانات لتسريع عرض الفلور أول ما يشتغل البوت
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://gifts.coffin.meme/api/marketplace/events?limit=100", timeout=10) as resp:
@@ -126,7 +126,6 @@ async def tonnel_websocket_loop():
     except Exception as e:
         print(f"Error initial fetch: {e}")
 
-    # لوب الاتصال المستمر بالويب سوكيت
     while True:
         try:
             async with websockets.connect(WS_URL, ping_interval=30) as websocket:
@@ -142,7 +141,6 @@ async def tonnel_websocket_loop():
                             
                         ev_data = event.get('data', {})
                         
-                        # إذا تم إضافة هدية جديدة للسوق
                         if ev_type == "listing.created":
                             gift_id = ev_data.get('gift', {}).get('gift_id')
                             if gift_id and ev_data.get('asset') == 'TON':
@@ -152,14 +150,12 @@ async def tonnel_websocket_loop():
                                 }
                                 await update_lowest_floor()
                                 
-                        # إذا تغير سعر هدية معروضة
                         elif ev_type == "listing.price_changed":
                             gift_id = ev_data.get('gift', {}).get('gift_id')
                             if gift_id and gift_id in active_listings and ev_data.get('asset') == 'TON':
                                 active_listings[gift_id]['price'] = float(ev_data.get('price', 0))
                                 await update_lowest_floor()
                                 
-                        # إذا تم إلغاء الهدية أو بيعها
                         elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished"]:
                             gift_id = ev_data.get('gift', {}).get('gift_id') if ev_data.get('gift') else ev_data.get('gift_id')
                             if gift_id and gift_id in active_listings:
@@ -201,7 +197,7 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
     if extra_buttons: inline_keyboard.extend(extra_buttons)
     inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
     
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}}
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
     if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
     
     async with aiohttp.ClientSession() as session:
@@ -219,7 +215,7 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
     if extra_buttons: inline_keyboard.extend(extra_buttons)
     inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
     
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}}
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
     
     async with aiohttp.ClientSession() as session:
         try: await session.post(url, json=payload, timeout=10)
@@ -337,8 +333,13 @@ async def fetch_mastercard_price(session):
             if response.status == 200:
                 data = await response.json()
                 if data.get('data') and len(data['data']) > 0:
-                    price = data['data'][0]['adv']['price']
-                    return str(int(float(price) * 100))
+                    price_str = data['data'][0]['adv']['price']
+                    price_float = float(price_str)
+                    
+                    if price_float < 2000:
+                        price_float = price_float * 100
+                    
+                    return int(price_float)
     except Exception: pass
     return None
 
@@ -355,7 +356,7 @@ async def update_prices_if_needed():
             crypto_task = session.get(crypto_url, timeout=6)
             master_task = fetch_mastercard_price(session)
             
-            response, master_price_str = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
+            response, fetched_iqd = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
             
             if not isinstance(response, Exception) and response.status == 200:
                 crypto_data = await response.json()
@@ -380,8 +381,8 @@ async def update_prices_if_needed():
             except:
                 crypto_prices['BATH'] = 0.03
 
-            if isinstance(master_price_str, str) and master_price_str.isdigit():
-                last_known_iqd = int(master_price_str)
+            if isinstance(fetched_iqd, int) and fetched_iqd > 0:
+                last_known_iqd = fetched_iqd
                 
             today_str = datetime.now().strftime('%Y-%m-%d')
             if daily_iqd['date'] != today_str:
@@ -643,11 +644,79 @@ async def check_alerts_loop(app: Application):
                     await send_custom_msg(chat_id, msg)
         alerts_db = [a for a in alerts_db if a['active']]
 
-# --- تشغيل اللوبات بالخلفية ---
 async def post_init(app: Application):
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
-    asyncio.create_task(tonnel_websocket_loop()) # تشغيل لوب الفلور
+    asyncio.create_task(tonnel_websocket_loop()) 
+
+# ==========================================
+# نظام بحث الهدايا
+# ==========================================
+async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = f"{SEARCH_EMOJI} <b>بحث عن هدية</b>\n\nأرسل اسم الهدية (مثال: plushpepe) أو رابطها (مثال: t.me/nft/plushpepe-1) للبحث عن أقل سعر لها في السوق:"
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
+    return ASK_GIFT_SEARCH
+
+async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip().lower()
+    chat_id = update.message.chat_id
+    msg_id = update.message.message_id
+    
+    if 't.me/nft/' in query or 'fragment.com' in query:
+        match = re.search(r'/nft/([a-zA-Z0-9_]+)(?:-\d+)?', query)
+        if match:
+            query = match.group(1).replace('-', ' ')
+            
+    clean_query = re.sub(r'-\d+$', '', query).replace(' ', '').lower()
+    
+    msg_wait = await send_custom_msg(chat_id, f"جاري البحث عن <b>{clean_query}</b>... {SEARCH_EMOJI}", msg_id)
+    
+    found_price = None
+    found_name = clean_query
+    found_gift_id = None
+    
+    for gift_id, data in active_listings.items():
+        if clean_query in data['name'].lower().replace(' ', ''):
+            if found_price is None or data['price'] < found_price:
+                found_price = data['price']
+                found_name = data['name']
+                found_gift_id = gift_id
+                
+    if found_price is None:
+        try:
+            search_url = f"https://portal-market.com/api/collections?search={urllib.parse.quote(clean_query)}&limit=10"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(search_url, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if "collections" in data and len(data["collections"]) > 0:
+                            found_price = float(data["collections"][0].get("floor_price", 0))
+                            found_name = data["collections"][0].get("name", found_name)
+        except Exception:
+            pass
+            
+    if found_price is not None and found_price > 0:
+        # إصلاح الرابط: التوجيه مباشرة إلى الهدية المحددة في السوق
+        if found_gift_id:
+            gift_url = f"https://t.me/tonnel_network_bot/marketplace?startapp=item-{found_gift_id}"
+        else:
+            # إذا لم نجد الهدية في WebSocket ولكن وجدناها في API الموقع (بدون ID محدد)، نوجهه لصفحة البحث في الماركت
+            clean_url_name = found_name.lower().replace(' ', '')
+            gift_url = f"https://t.me/tonnel_network_bot/marketplace?startapp=search-{clean_url_name}"
+        
+        msg = f"{GIFT_FLOOR_EMOJI} نتيجة البحث:\nالهدية: <b>{found_name}</b>\nأقل سعر: <b>{found_price:g}</b> GRAM"
+        btn = [[{
+            "text": "عرض الهدية", 
+            "url": gift_url, 
+            "style": "success", 
+            "icon_custom_emoji_id": "5210956306952758910"
+        }]]
+        await edit_custom_msg(chat_id, msg_wait, msg, extra_buttons=btn)
+    else:
+        await edit_custom_msg(chat_id, msg_wait, f"عذراً، لم أتمكن من العثور على هدية بهذا الاسم معروضة للبيع حالياً. {FAIL_EMOJI}")
+        
+    return ConversationHandler.END
+
 
 # --- معالجة الرسائل العامة ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -674,6 +743,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f'{NUM_EMOJIS[4]} <b>تفعيل التنبيهات</b>: لتفعيل/إلغاء وضع مراقبة حيتان GRAM وإرسال إشعار للتحويلات الضخمة {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[5]} <b>رصيدي</b>: لمعرفة رصيدك في المحفظة المربوطة {END_EMOJIS}\n\n'
         msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير محفظة GRAM الخاصة بك {END_EMOJIS}\n'
+        msg += f'<tg-emoji emoji-id="5411597774359653692">🔍</tg-emoji> <b>بحث هدية</b>: للبحث عن ارخص سعر لهدية معينة {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
 
@@ -681,7 +751,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await toggle_whale_alerts(update, context)
         return
 
-    if text == "فلور الهدايا":
+    if text in ["فلور الهدايا", "فلور", "هدايا"]:
         msg = f"{GIFT_FLOOR_EMOJI} فلور الهدايا الحالي:\nالهدية: <b>{gift_floor['name']}</b>\nالسعر: <b>{gift_floor['price']:g}</b> GRAM"
         btn = [[{
             "text": "عرض الهدية", 
@@ -775,8 +845,17 @@ def main():
         fallbacks=[]
     )
     
+    search_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(r'^/?بحث هدية$|/?بحث$'), gift_search_start)],
+        states={ASK_GIFT_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, perform_gift_search)]},
+        fallbacks=[],
+        per_chat=True, per_user=True
+    )
+    
     app.add_handler(alert_conv_handler)
     app.add_handler(wallet_conv_handler)
+    app.add_handler(search_conv_handler)
+    
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
