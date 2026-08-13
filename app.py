@@ -25,8 +25,8 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
 ADMIN_ID = 7126816492
 
-# نظام الكاش والبيانات
-CACHE_TIME = 5
+# نظام الكاش والبيانات - تم التعديل إلى 3 ثواني
+CACHE_TIME = 3
 last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
@@ -100,7 +100,6 @@ async def update_lowest_floor():
     gift_floor['price'] = lowest_data['price']
     gift_floor['name'] = lowest_data['name']
     
-    # إصلاح الرابط ليفتح الهدية داخل بوت الـ NFT الرسمي
     clean_url_name = lowest_data['name'].lower().replace(' ', '')
     gift_floor['url'] = f"https://t.me/nft/{clean_url_name}-{lowest_gift_id}"
 
@@ -329,7 +328,8 @@ async def fetch_mastercard_price(session):
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
         headers = {"Content-Type": "application/json"}
-        payload = {"fiat": "IQD", "page": 1, "rows": 1, "tradeType": "BUY", "asset": "USDT", "countries": [], "payTypes": [], "publisherType": None, "merchantCheck": False}
+        # تم التعديل إلى SELL لجلب أعلى سعر من التجار المشترين
+        payload = {"fiat": "IQD", "page": 1, "rows": 1, "tradeType": "SELL", "asset": "USDT", "countries": [], "payTypes": [], "publisherType": None, "merchantCheck": False}
         async with session.post(url, json=payload, headers=headers, timeout=5) as response:
             if response.status == 200:
                 data = await response.json()
@@ -614,7 +614,7 @@ async def check_whales_loop(app: Application):
 async def check_alerts_loop(app: Application):
     global alerts_db 
     while True:
-        await asyncio.sleep(8) 
+        await asyncio.sleep(3) # تم تقليل اللوب إلى 3 ثواني
         if not alerts_db: continue
         if not await update_prices_if_needed(): continue
         
@@ -663,39 +663,41 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.message.chat_id
     msg_id = update.message.message_id
     
-    if 't.me/nft/' in query or 'fragment.com' in query:
-        match = re.search(r'/nft/([a-zA-Z0-9_]+)(?:-\d+)?', query)
-        if match:
-            query = match.group(1).replace('-', ' ')
-            
-    clean_query = re.sub(r'-\d+$', '', query).replace(' ', '').lower()
+    # إصلاح استخراج الاسم من الرابط (يدعم t.me/nft/ و fragment.com/nft/)
+    match = re.search(r'nft/([a-zA-Z0-9_]+)(?:-\d+)?', query)
+    if match:
+        query_name = match.group(1).replace('-', '')
+    else:
+        # تنظيف المدخل العادي
+        query_name = re.sub(r'-\d+$', '', query).replace(' ', '')
     
-    msg_wait = await send_custom_msg(chat_id, f"جاري البحث عن <b>{clean_query}</b>... {SEARCH_EMOJI}", msg_id)
+    msg_wait = await send_custom_msg(chat_id, f"جاري البحث عن <b>{query_name}</b>... {SEARCH_EMOJI}", msg_id)
     
     found_price = None
-    found_name = clean_query
+    found_name = query_name
     found_gift_id = None
     
-    # إصلاح البحث: التأكد من التطابق الدقيق للاسم وليس فقط (جزء من الاسم)
+    # البحث بتطابق دقيق (Exact Match) في الذاكرة الحية أولاً
     for gift_id, data in active_listings.items():
-        listing_clean_name = data['name'].lower().replace(' ', '')
-        if clean_query == listing_clean_name:
+        listing_name = data['name'].lower().replace(' ', '')
+        if query_name == listing_name:
             if found_price is None or data['price'] < found_price:
                 found_price = data['price']
                 found_name = data['name']
                 found_gift_id = gift_id
                 
+    # إذا لم يجدها، نبحث في API البديل
     if found_price is None:
         try:
-            search_url = f"https://portal-market.com/api/collections?search={urllib.parse.quote(clean_query)}&limit=10"
+            search_url = f"https://portal-market.com/api/collections?search={urllib.parse.quote(query_name)}&limit=10"
             async with aiohttp.ClientSession() as session:
                 async with session.get(search_url, timeout=5) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if "collections" in data and len(data["collections"]) > 0:
-                            # فلترة إضافية للتطابق الدقيق من API
                             for collection in data["collections"]:
-                                if clean_query == collection.get("name", "").lower().replace(' ', ''):
+                                api_name = collection.get("name", "").lower().replace(' ', '')
+                                if query_name == api_name:
                                     found_price = float(collection.get("floor_price", 0))
                                     found_name = collection.get("name", found_name)
                                     break
@@ -704,7 +706,6 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             
     if found_price is not None and found_price > 0:
         clean_url_name = found_name.lower().replace(' ', '')
-        # رابط توجيه الهدية المباشر يفتح في بوت NFT الرسمي للهدية المحددة بالرقم
         if found_gift_id:
             gift_url = f"https://t.me/nft/{clean_url_name}-{found_gift_id}"
         else:
