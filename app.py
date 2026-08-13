@@ -6,21 +6,23 @@ import threading
 import asyncio
 import re
 import html 
+import json
+import websockets
 from datetime import datetime
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, filters, ContextTypes, ChatMemberHandler
 from telegram.request import HTTPXRequest
 
-# قم برفع مستوى تسجيل مكتبة httpx إلى WARNING
-# هذا سيخفي الـ INFO التي تحتوي على الروابط والتوكنات
+# إخفاء اللوجات المزعجة
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
-ADMIN_ID = 7126816492 # آيدي حسابك ليوصلك الاشعارات
+ADMIN_ID = 7126816492
 
 # نظام الكاش والبيانات
 CACHE_TIME = 5
@@ -28,26 +30,26 @@ last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
 crypto_prices = {'BTC': 0, 'GRAM': 0, 'BATH': 0.03} 
-
-# تتبع الصعود والنزول على مدار 24 ساعة
 crypto_24h_trend = {'BTC': 0.0, 'GRAM': 0.0, 'BATH': 0.0} 
 daily_iqd = {'date': '', 'open_price': 0} 
 
-# قواعد البيانات (في الذاكرة)
 alerts_db = []
 user_wallets = {} 
 bot_users = set() 
 whale_alert_users = {} 
 
-# حالات المحادثة
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
 
-# --- بيانات فلور الهدايا (مبدئية لحين ربطها بالـ API) ---
+# --- متغيرات Tonnel Marketplace ---
+WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
+# قاموس لحفظ أسعار جميع الهدايا المعروضة (gift_id -> price)
+active_listings = {}
+
 gift_floor = {
     "price": 0.0, 
-    "url": "https://gifts.coffin.meme", 
-    "name": "جاري جلب البيانات..."
+    "url": "https://tonnel.network", # رابط افتراضي
+    "name": "جاري التحديث..."
 }
 
 # --- الملصقات المميزة ---
@@ -61,8 +63,6 @@ MASTER_EMOJI = '<tg-emoji emoji-id="5812036009365343919">💳</tg-emoji>'
 GRAM_EMOJI = '<tg-emoji emoji-id="5300919220215780911">💎</tg-emoji>' 
 BATH_EMOJI = '<tg-emoji emoji-id="5330015905659264283">🛁</tg-emoji>' 
 FOOL_EMOJI = '<tg-emoji emoji-id="5841545015964209734">😂</tg-emoji>' 
-
-# ملصقات عامة تم إضافتها للنصوص
 CLIPBOARD_EMOJI = '<tg-emoji emoji-id="5800769433974611462">📋</tg-emoji>'
 END_EMOJIS = '<tg-emoji emoji-id="5210956306952758910">✔️</tg-emoji> <tg-emoji emoji-id="5958605483488055761">✅</tg-emoji>'
 WARN_EMOJI = '<tg-emoji emoji-id="5213195952008997792">⚠️</tg-emoji>'
@@ -75,7 +75,6 @@ FAIL_EMOJI = '<tg-emoji emoji-id="5215204871422093648">❌</tg-emoji>'
 USDT_CASH = '<tg-emoji emoji-id="5213170203680060059">💵</tg-emoji>'
 HELLO_EMOJI = '<tg-emoji emoji-id="5800769433974611462">👋</tg-emoji>'
 
-# أرقام الملصقات
 NUM_EMOJIS = {
     1: '<tg-emoji emoji-id="5408894951440279259">1️⃣</tg-emoji>',
     2: '<tg-emoji emoji-id="5411585799990830248">2️⃣</tg-emoji>',
@@ -84,6 +83,95 @@ NUM_EMOJIS = {
     5: '<tg-emoji emoji-id="5409338071806146386">5️⃣</tg-emoji>',
     6: '<tg-emoji emoji-id="5409194048667807708">6️⃣</tg-emoji>'
 }
+
+
+# ==========================================
+# دالة الاتصال بـ Tonnel WebSocket
+# ==========================================
+async def update_lowest_floor():
+    global gift_floor
+    if not active_listings:
+        return
+        
+    # البحث عن أقل سعر في القاموس
+    lowest_gift_id = min(active_listings, key=lambda k: active_listings[k]['price'])
+    lowest_data = active_listings[lowest_gift_id]
+    
+    # تحديث المتغير العام اللي ينعرض للمستخدمين
+    gift_floor['price'] = lowest_data['price']
+    gift_floor['name'] = lowest_data['name']
+    gift_floor['url'] = f"https://tonnel.network/gift/{lowest_gift_id}" # الرابط الافتراضي للهدية
+
+async def tonnel_websocket_loop():
+    global active_listings
+    
+    # جلب مبدئي للبيانات لتسريع عرض الفلور أول ما يشتغل البوت
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://gifts.coffin.meme/api/marketplace/events?limit=100", timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for event in data.get('events', []):
+                        ev_type = event.get('type')
+                        ev_data = event.get('data', {})
+                        
+                        if ev_type == "listing.created":
+                            gift_id = ev_data.get('gift', {}).get('gift_id')
+                            if gift_id and ev_data.get('asset') == 'TON':
+                                active_listings[gift_id] = {
+                                    'price': float(ev_data.get('price', 0)),
+                                    'name': ev_data.get('gift', {}).get('gift_name', 'Unknown')
+                                }
+                    await update_lowest_floor()
+    except Exception as e:
+        print(f"Error initial fetch: {e}")
+
+    # لوب الاتصال المستمر بالويب سوكيت
+    while True:
+        try:
+            async with websockets.connect(WS_URL, ping_interval=30) as websocket:
+                print("✅ المتصل بـ Tonnel WebSocket")
+                
+                async for message in websocket:
+                    try:
+                        event = json.loads(message)
+                        ev_type = event.get('type')
+                        
+                        if ev_type == "marketplace.connected":
+                            continue
+                            
+                        ev_data = event.get('data', {})
+                        
+                        # إذا تم إضافة هدية جديدة للسوق
+                        if ev_type == "listing.created":
+                            gift_id = ev_data.get('gift', {}).get('gift_id')
+                            if gift_id and ev_data.get('asset') == 'TON':
+                                active_listings[gift_id] = {
+                                    'price': float(ev_data.get('price', 0)),
+                                    'name': ev_data.get('gift', {}).get('gift_name', 'Unknown')
+                                }
+                                await update_lowest_floor()
+                                
+                        # إذا تغير سعر هدية معروضة
+                        elif ev_type == "listing.price_changed":
+                            gift_id = ev_data.get('gift', {}).get('gift_id')
+                            if gift_id and gift_id in active_listings and ev_data.get('asset') == 'TON':
+                                active_listings[gift_id]['price'] = float(ev_data.get('price', 0))
+                                await update_lowest_floor()
+                                
+                        # إذا تم إلغاء الهدية أو بيعها
+                        elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished"]:
+                            gift_id = ev_data.get('gift', {}).get('gift_id') if ev_data.get('gift') else ev_data.get('gift_id')
+                            if gift_id and gift_id in active_listings:
+                                del active_listings[gift_id]
+                                await update_lowest_floor()
+                                
+                    except json.JSONDecodeError:
+                        pass
+        except Exception as e:
+            print(f"⚠️ انقطع الاتصال بـ Tonnel, جاري إعادة المحاولة... {e}")
+            await asyncio.sleep(5)
+
 
 # --- نظام اشعارات وتتبع المستخدمين ---
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
@@ -111,7 +199,6 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     inline_keyboard = []
     if extra_buttons: inline_keyboard.extend(extra_buttons)
-    # زر اخبار الهدايا بلون أحمر (danger) مع ملصق مميز للإنلاين
     inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
     
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}}
@@ -130,7 +217,6 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
     url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
     inline_keyboard = []
     if extra_buttons: inline_keyboard.extend(extra_buttons)
-    # زر اخبار الهدايا بلون أحمر (danger) مع ملصق مميز للإنلاين
     inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
     
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}}
@@ -313,7 +399,6 @@ async def update_prices_if_needed():
             
             asia_price_for_100_usd = int(last_known_iqd / 0.9)
 
-            # كليشة الأسعار المحدثة لعرض فلور الهدايا أولاً
             msg = (f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
                    f'{GIFT_FLOOR_EMOJI} فلور الهدايا: <b>{gift_floor["price"]:g}</b> GRAM\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
@@ -524,7 +609,6 @@ async def check_whales_loop(app: Application):
         except Exception:
             pass 
 
-# --- اللوب الرئيسي لتنبيهات الأسعار ---
 async def check_alerts_loop(app: Application):
     global alerts_db 
     while True:
@@ -559,9 +643,11 @@ async def check_alerts_loop(app: Application):
                     await send_custom_msg(chat_id, msg)
         alerts_db = [a for a in alerts_db if a['active']]
 
+# --- تشغيل اللوبات بالخلفية ---
 async def post_init(app: Application):
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
+    asyncio.create_task(tonnel_websocket_loop()) # تشغيل لوب الفلور
 
 # --- معالجة الرسائل العامة ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -595,7 +681,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await toggle_whale_alerts(update, context)
         return
 
-    # --- أمر فلور الهدايا ---
     if text == "فلور الهدايا":
         msg = f"{GIFT_FLOOR_EMOJI} فلور الهدايا الحالي:\nالهدية: <b>{gift_floor['name']}</b>\nالسعر: <b>{gift_floor['price']:g}</b> GRAM"
         btn = [[{
@@ -660,7 +745,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"⚠️ ظهر خطأ بالبوت: {context.error}")
 
-# --- سيرفر الويب الأساسي ---
 web_app = Flask(__name__)
 @web_app.route('/')
 def home(): return "البوت شغال بقوة 🔥"
@@ -693,9 +777,7 @@ def main():
     
     app.add_handler(alert_conv_handler)
     app.add_handler(wallet_conv_handler)
-    
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.MY_CHAT_MEMBER))
-    
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
