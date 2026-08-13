@@ -2,14 +2,6 @@ import os
 import time
 import aiohttp
 import logging
-
-# قم برفع مستوى تسجيل مكتبة httpx إلى WARNING
-# هذا سيخفي الـ INFO التي تحتوي على الروابط والتوكنات
-logging.getLogger("httpx").setLevel(logging.WARNING)
-
-# إذا كنت تريد التأكد أيضاً من مكتبة التلجرام نفسها:
-logging.getLogger("telegram").setLevel(logging.WARNING)
-
 import threading
 import asyncio
 import re
@@ -20,13 +12,14 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, filters, ContextTypes, ChatMemberHandler
 from telegram.request import HTTPXRequest
 
-# إعدادات اللوج
+# قم برفع مستوى تسجيل مكتبة httpx إلى WARNING
+# هذا سيخفي الـ INFO التي تحتوي على الروابط والتوكنات
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-
 TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
-
 ADMIN_ID = 7126816492 # آيدي حسابك ليوصلك الاشعارات
 
 # نظام الكاش والبيانات
@@ -50,7 +43,15 @@ whale_alert_users = {}
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
 
+# --- بيانات فلور الهدايا (مبدئية لحين ربطها بالـ API) ---
+gift_floor = {
+    "price": 0.0, 
+    "url": "https://gifts.coffin.meme", 
+    "name": "جاري جلب البيانات..."
+}
+
 # --- الملصقات المميزة ---
+GIFT_FLOOR_EMOJI = '<tg-emoji emoji-id="5255980157058975232">🎁</tg-emoji>'
 UP_EMOJI = '<tg-emoji emoji-id="5449683594425410231">📈</tg-emoji>'
 DOWN_EMOJI = '<tg-emoji emoji-id="5447183459602669338">📉</tg-emoji>'
 WHALE_BELL = '<tg-emoji emoji-id="5215372534060428125">🔔</tg-emoji>'
@@ -110,9 +111,12 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     inline_keyboard = []
     if extra_buttons: inline_keyboard.extend(extra_buttons)
-    inline_keyboard.append([{"text": "اخبار الفلوس", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
+    # زر اخبار الهدايا بلون أحمر (danger) مع ملصق مميز للإنلاين
+    inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
+    
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}}
     if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
+    
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, json=payload, timeout=10) as resp:
@@ -126,8 +130,11 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
     url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
     inline_keyboard = []
     if extra_buttons: inline_keyboard.extend(extra_buttons)
-    inline_keyboard.append([{"text": "اخبار الفلوس", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
+    # زر اخبار الهدايا بلون أحمر (danger) مع ملصق مميز للإنلاين
+    inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
+    
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}}
+    
     async with aiohttp.ClientSession() as session:
         try: await session.post(url, json=payload, timeout=10)
         except Exception: pass
@@ -258,7 +265,6 @@ async def update_prices_if_needed():
         
     try:
         async with aiohttp.ClientSession() as session:
-            # FIX: تحديد الرموز لمنع البلوك من باينس ولتسريع الاستجابة
             crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","GRAMUSDT"]'
             crypto_task = session.get(crypto_url, timeout=6)
             master_task = fetch_mastercard_price(session)
@@ -276,7 +282,6 @@ async def update_prices_if_needed():
                         crypto_prices['TON'] = float(item['lastPrice'])
                         crypto_24h_trend['TON'] = float(item['priceChangePercent'])
 
-            # جلب الباث بشكل منفصل وآمن (اذا ما لگاه يستخدم السعر الافتراضي وما يطفي البوت)
             try:
                 bath_url = 'https://api.binance.com/api/v3/ticker/24hr?symbol=BATHUSDT'
                 async with session.get(bath_url, timeout=3) as bath_resp:
@@ -308,7 +313,10 @@ async def update_prices_if_needed():
             
             asia_price_for_100_usd = int(last_known_iqd / 0.9)
 
+            # كليشة الأسعار المحدثة لعرض فلور الهدايا أولاً
             msg = (f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
+                   f'{GIFT_FLOOR_EMOJI} فلور الهدايا: <b>{gift_floor["price"]:g}</b> GRAM\n'
+                   "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
                    f'{MASTER_EMOJI} الدولار (100$): <b>{last_known_iqd:,}</b> IQD {iqd_trend}\n'
                    f'{ASIA_EMOJI} اسيا (100$): <b>{asia_price_for_100_usd:,}</b> دينار\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
@@ -567,7 +575,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word in text.split() for word in forbidden): return
 
-    # FIX: التون المعزول فقط يترزل، حتى كلمة (بتكوين) تعبر بسلام
     if re.search(r'(^|\s)(تون|ton)(\s|$)', text):
         msg = f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}"
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
@@ -586,6 +593,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "تفعيل التنبيهات":
         await toggle_whale_alerts(update, context)
+        return
+
+    # --- أمر فلور الهدايا ---
+    if text == "فلور الهدايا":
+        msg = f"{GIFT_FLOOR_EMOJI} فلور الهدايا الحالي:\nالهدية: <b>{gift_floor['name']}</b>\nالسعر: <b>{gift_floor['price']:g}</b> GRAM"
+        btn = [[{
+            "text": "عرض الهدية", 
+            "url": gift_floor["url"], 
+            "style": "success", 
+            "icon_custom_emoji_id": "5210956306952758910"
+        }]]
+        await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
     if text in ["رصيدي", "/رصيدي", "رص", "/رص"]:
@@ -625,7 +644,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
-    # FIX: إرجاع نظام التوافق الصارم (re.match) حتى يرد فقط على الأوامر الصافية (مثل 1 جرام) وميتداخل وية السوالف
     calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(\d+(?:\.\d+)?)\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)\s*$', text)
     if calc_match:
         await update_prices_if_needed()
