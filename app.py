@@ -41,7 +41,7 @@ whale_alert_users = {}
 
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
-ASK_GIFT_SEARCH = 4 # حالة جديدة للبحث عن هدية
+ASK_GIFT_SEARCH = 4 
 
 # --- متغيرات Tonnel Marketplace ---
 WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
@@ -49,7 +49,7 @@ active_listings = {}
 
 gift_floor = {
     "price": 0.0, 
-    "url": "https://t.me/tonnel_network_bot/marketplace", # رابط افتراضي يفتح الماركت
+    "url": "https://t.me/nft", 
     "name": "جاري التحديث..."
 }
 
@@ -100,8 +100,9 @@ async def update_lowest_floor():
     gift_floor['price'] = lowest_data['price']
     gift_floor['name'] = lowest_data['name']
     
-    # إصلاح الرابط: التوجيه مباشرة إلى الهدية المعروضة داخل الماركت (Mini App)
-    gift_floor['url'] = f"https://t.me/tonnel_network_bot/marketplace?startapp=item-{lowest_gift_id}"
+    # إصلاح الرابط ليفتح الهدية داخل بوت الـ NFT الرسمي
+    clean_url_name = lowest_data['name'].lower().replace(' ', '')
+    gift_floor['url'] = f"https://t.me/nft/{clean_url_name}-{lowest_gift_id}"
 
 async def tonnel_websocket_loop():
     global active_listings
@@ -675,8 +676,10 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     found_name = clean_query
     found_gift_id = None
     
+    # إصلاح البحث: التأكد من التطابق الدقيق للاسم وليس فقط (جزء من الاسم)
     for gift_id, data in active_listings.items():
-        if clean_query in data['name'].lower().replace(' ', ''):
+        listing_clean_name = data['name'].lower().replace(' ', '')
+        if clean_query == listing_clean_name:
             if found_price is None or data['price'] < found_price:
                 found_price = data['price']
                 found_name = data['name']
@@ -690,20 +693,23 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                     if resp.status == 200:
                         data = await resp.json()
                         if "collections" in data and len(data["collections"]) > 0:
-                            found_price = float(data["collections"][0].get("floor_price", 0))
-                            found_name = data["collections"][0].get("name", found_name)
+                            # فلترة إضافية للتطابق الدقيق من API
+                            for collection in data["collections"]:
+                                if clean_query == collection.get("name", "").lower().replace(' ', ''):
+                                    found_price = float(collection.get("floor_price", 0))
+                                    found_name = collection.get("name", found_name)
+                                    break
         except Exception:
             pass
             
     if found_price is not None and found_price > 0:
-        # إصلاح الرابط: التوجيه مباشرة إلى الهدية المحددة في السوق
+        clean_url_name = found_name.lower().replace(' ', '')
+        # رابط توجيه الهدية المباشر يفتح في بوت NFT الرسمي للهدية المحددة بالرقم
         if found_gift_id:
-            gift_url = f"https://t.me/tonnel_network_bot/marketplace?startapp=item-{found_gift_id}"
+            gift_url = f"https://t.me/nft/{clean_url_name}-{found_gift_id}"
         else:
-            # إذا لم نجد الهدية في WebSocket ولكن وجدناها في API الموقع (بدون ID محدد)، نوجهه لصفحة البحث في الماركت
-            clean_url_name = found_name.lower().replace(' ', '')
-            gift_url = f"https://t.me/tonnel_network_bot/marketplace?startapp=search-{clean_url_name}"
-        
+            gift_url = f"https://t.me/nft/{clean_url_name}"
+            
         msg = f"{GIFT_FLOOR_EMOJI} نتيجة البحث:\nالهدية: <b>{found_name}</b>\nأقل سعر: <b>{found_price:g}</b> GRAM"
         btn = [[{
             "text": "عرض الهدية", 
