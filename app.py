@@ -24,10 +24,10 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
 
-# --- قائمة المطورين (أنت والمطور الثاني) ---
+# --- قائمة المطورين ---
 ADMIN_IDS = [7126816492, 1955081272]
 
-# نظام الكاش والبيانات
+# نظام الكاش والبيانات - التحديث كل 3 ثواني
 CACHE_TIME = 3
 last_fetch_time = 0
 cached_msg = ""
@@ -191,11 +191,10 @@ async def is_user_banned(update: Update) -> bool:
             [{"text": "الروسي", "url": "https://t.me/M6M9N", "style": "success", "icon_custom_emoji_id": "5372930329822659547"}],
             [{"text": "ساسكي", "url": "https://t.me/O1916", "style": "danger", "icon_custom_emoji_id": "5258021357446268553"}]
         ]
-        # استخدام send_custom_msg_banned المخصصة للون الأزرق لزر أخبار الهدايا في رسالة الحظر
+        # استخدام الدالة المخصصة للون الأزرق لزر أخبار الهدايا
         await send_custom_msg_banned(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn)
         return True
     return False
-
 
 # --- دوال الإرسال الشاملة ---
 # الدالة المخصصة لرسالة الحظر (لون زر أخبار الهدايا أزرق)
@@ -209,6 +208,7 @@ async def send_custom_msg_banned(chat_id, text, reply_to_message_id=None, extra_
             else:
                 inline_keyboard.append([btn_group])
                 
+    # لون زر أخبار الهدايا أزرق (primary) للمحظورين
     inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "primary", "icon_custom_emoji_id": "5224257782013769471"}])
     
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
@@ -231,6 +231,7 @@ async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons
             else:
                 inline_keyboard.append([btn_group])
                 
+    # لون زر أخبار الهدايا أحمر (danger) للرسائل العادية
     inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
     
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
@@ -261,7 +262,6 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
     async with aiohttp.ClientSession() as session:
         try: await session.post(url, json=payload, timeout=10)
         except Exception: pass
-
 
 # --- API فحص المحفظة ---
 async def check_ton_wallet(address):
@@ -789,7 +789,7 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
-# --- معالجة الرسائل العامة ---
+# --- معالجة الرسائل العامة الشاملة (التي تضم أوامر الحظر) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     original_text = update.message.text.strip()
