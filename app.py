@@ -262,57 +262,6 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
         try: await session.post(url, json=payload, timeout=10)
         except Exception: pass
 
-# --- أوامر الحظر (للاحتياط عبر CommandHandler) ---
-async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_IDS: return
-
-    target_id = None
-    target_name = "المستخدم"
-
-    if update.message.reply_to_message:
-        target_id = update.message.reply_to_message.from_user.id
-        target_name = update.message.reply_to_message.from_user.first_name
-    elif context.args:
-        arg = context.args[0]
-        if arg.startswith('@'):
-            username = arg.replace('@', '').lower()
-            if username in user_mapping:
-                target_id = user_mapping[username]
-                target_name = arg
-        elif arg.isdigit():
-            target_id = int(arg)
-            target_name = str(target_id)
-            
-    if target_id:
-        if target_id in ADMIN_IDS:
-            await send_custom_msg(update.message.chat_id, f"عذراً، لا يمكنك حظر المطورين! {WARN_EMOJI}", update.message.message_id)
-            return
-        banned_users.add(target_id)
-        await send_custom_msg(update.message.chat_id, f"✅ تم حظر {target_name} بنجاح ولن يتمكن من استخدام البوت.", update.message.message_id)
-    else:
-        await send_custom_msg(update.message.chat_id, f"يرجى الرد على رسالة الشخص أو كتابة يوزره أو الايدي الخاص به.\nمثال: `/ban @username` أو `/ban 123456789`", update.message.message_id)
-
-async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_IDS: return
-
-    target_id = None
-    if update.message.reply_to_message:
-        target_id = update.message.reply_to_message.from_user.id
-    elif context.args:
-        arg = context.args[0]
-        if arg.startswith('@'):
-            username = arg.replace('@', '').lower()
-            if username in user_mapping: target_id = user_mapping[username]
-        elif arg.isdigit():
-            target_id = int(arg)
-            
-    if target_id and target_id in banned_users:
-        banned_users.remove(target_id)
-        await send_custom_msg(update.message.chat_id, f"✅ تم فك الحظر بنجاح.", update.message.message_id)
-    else:
-        await send_custom_msg(update.message.chat_id, f"المستخدم غير محظور أو لم يتم العثور عليه. {WARN_EMOJI}", update.message.message_id)
 
 # --- API فحص المحفظة ---
 async def check_ton_wallet(address):
@@ -779,7 +728,6 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     found_gift_id = None
     found_gift_num = None
     
-    # البحث الشامل في الـ WebSocket 
     for gift_id, data in active_listings.items():
         listing_name_clean = data['name'].lower().replace(' ', '')
         if clean_compare in listing_name_clean:
@@ -789,7 +737,6 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                 found_gift_id = gift_id
                 found_gift_num = data.get('num', '')
                 
-    # إذا ما لكاها يروح للـ GetGems المتخصص
     if found_price is None:
         try:
             search_url = f"https://api.getgems.io/graphql"
@@ -853,7 +800,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update): return
 
     # --- معالجة أوامر الحظر بشكل مباشر ---
-    if text.startswith("حظر") or text.startswith("/ban"):
+    if text.startswith("حظر") or text.startswith("/ban") or text.startswith("ban"):
         if user_id not in ADMIN_IDS: return
         target_id = None
         target_name = "المستخدم"
@@ -881,10 +828,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 banned_users.add(target_id)
                 await send_custom_msg(chat_id, f"✅ تم حظر {target_name} بنجاح ولن يتمكن من استخدام البوت.", msg_id)
         else:
-            await send_custom_msg(chat_id, f"يرجى الرد على رسالة الشخص أو كتابة يوزره أو الايدي الخاص به.\nمثال: `حظر @username`", msg_id)
+            await send_custom_msg(chat_id, f"ارسل ايدي او يوزر الشخص لحظره", msg_id)
         return
 
-    if text.startswith("الغاء الحظر") or text.startswith("الغاء حظر") or text.startswith("/unban"):
+    if text.startswith("الغاء الحظر") or text.startswith("الغاء حظر") or text.startswith("/unban") or text.startswith("unban"):
         if user_id not in ADMIN_IDS: return
         target_id = None
         
@@ -904,7 +851,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             banned_users.remove(target_id)
             await send_custom_msg(chat_id, f"✅ تم فك الحظر بنجاح.", msg_id)
         else:
-            await send_custom_msg(chat_id, f"المستخدم غير محظور أو لم يتم العثور عليه. {WARN_EMOJI}", msg_id)
+            if not target_id:
+                await send_custom_msg(chat_id, f"ارسل ايدي او يوزر الشخص لفك الحظر عنه", msg_id)
+            else:
+                await send_custom_msg(chat_id, f"المستخدم غير محظور أو لم يتم العثور عليه. {WARN_EMOJI}", msg_id)
         return
 
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
@@ -1034,13 +984,11 @@ def main():
     app.add_handler(wallet_conv_handler)
     app.add_handler(search_conv_handler)
     
-    app.add_handler(CommandHandler("ban", ban_command))
-    app.add_handler(CommandHandler("unban", unban_command))
-    
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    # الآن الـ MessageHandler يقرأ كل النصوص بدون استثناء (لضمان عمل أوامر الحظر الجديدة)
+    app.add_handler(MessageHandler(filters.TEXT, handle_message))
     app.add_error_handler(error_handler)
     
     print("--- البوت شغال الآن ومستعد للعمل ---")
