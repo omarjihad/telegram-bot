@@ -53,6 +53,8 @@ ASK_UNBAN = 6
 # --- متغيرات Tonnel Marketplace ---
 WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
 active_listings = {}
+seen_events = set() # لمنع تكرار الأحداث ومعالجة التعليق
+last_event_id = "" # لحفظ آخر حدث لتشغيل الـ Replay بشكل صحيح
 
 gift_floor = {
     "price": "0", 
@@ -83,20 +85,24 @@ SUCCESS_EMOJI = '<tg-emoji emoji-id="5215492745900077682">✅</tg-emoji>'
 FAIL_EMOJI = '<tg-emoji emoji-id="5215204871422093648">❌</tg-emoji>'
 USDT_CASH = '<tg-emoji emoji-id="5213170203680060059">💵</tg-emoji>'
 HELLO_EMOJI = '<tg-emoji emoji-id="5800769433974611462">👋</tg-emoji>'
+NUM_EMOJIS = {1: '1️⃣', 2: '2️⃣', 3: '3️⃣', 4: '4️⃣', 5: '5️⃣', 6: '6️⃣'}
 
-# زر الإلغاء الشامل
-CANCEL_BTN = [{"text": "الغاء", "callback_data": "cancel", "style": "danger", "icon_custom_emoji_id": "5440681540541502133"}]
+# زر الإلغاء الشامل (تم التعديل للون الأزرق primary)
+CANCEL_BTN = [{"text": "الغاء", "callback_data": "cancel", "style": "primary", "icon_custom_emoji_id": "5440681540541502133"}]
 
 def format_exact_price(price):
     if price == int(price): return str(int(price))
     return f"{price:.6f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# دالة الاتصال بـ Tonnel WebSocket
+# دالة الاتصال بـ Tonnel WebSocket ونظام Replay الشامل
 # ==========================================
 async def update_lowest_floor():
     global gift_floor
-    if not active_listings: return
+    if not active_listings: 
+        gift_floor['price'] = "0"
+        gift_floor['name'] = "جاري التحديث..."
+        return
         
     lowest_gift_id = min(active_listings, key=lambda k: active_listings[k]['price'])
     lowest_data = active_listings[lowest_gift_id]
@@ -111,60 +117,90 @@ async def update_lowest_floor():
     if gift_num: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
     else: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
 
-async def tonnel_websocket_loop():
-    global active_listings
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://gifts.coffin.meme/api/marketplace/events?limit=500", timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    events = data.get('events', [])
-                    for event in reversed(events):
-                        ev_type = event.get('type')
-                        ev_data = event.get('data', {})
-                        gift_id = ev_data.get('gift', {}).get('gift_id') if ev_data.get('gift') else ev_data.get('gift_id')
-                        if not gift_id: continue
-                        if ev_type == "listing.created" and ev_data.get('asset') == 'TON':
-                            active_listings[gift_id] = {
-                                'price': float(ev_data.get('price', 0)),
-                                'name': ev_data.get('gift', {}).get('gift_name', 'Unknown'),
-                                'num': ev_data.get('gift', {}).get('gift_num', '') 
-                            }
-                        elif ev_type == "listing.price_changed" and gift_id in active_listings and ev_data.get('asset') == 'TON':
-                            active_listings[gift_id]['price'] = float(ev_data.get('price', 0))
-                        elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed"]:
-                            if gift_id in active_listings: del active_listings[gift_id]
-                    await update_lowest_floor()
-    except Exception: pass
+# معالجة كل حدث بشكل منفصل وموثوق
+async def consume_event(event):
+    global active_listings, last_event_id, seen_events
+    
+    ev_id = event.get('eventId')
+    if not ev_id or ev_id in seen_events: return
+    
+    seen_events.add(ev_id)
+    if len(seen_events) > 50000: seen_events.clear() # تنظيف الذاكرة لمنع الضغط
+    
+    last_event_id = ev_id
+    ev_type = event.get('type')
+    ev_data = event.get('data', {})
+    
+    # محاولة استخراج معلومات الهدية بأي شكل مدعوم
+    gift_info = ev_data.get('gift')
+    if not gift_info and 'gift_id' in ev_data: gift_info = ev_data
+    gift_id = gift_info.get('gift_id') if gift_info else None
+    
+    if not gift_id: return
 
+    # إضافة الهدايا العادية والمقفولة (Premarket)
+    if ev_type in ["listing.created", "premarket.listing_created"] and ev_data.get('asset') == 'TON':
+        active_listings[gift_id] = {
+            'price': float(ev_data.get('price', 0)),
+            'name': gift_info.get('gift_name', 'Unknown'),
+            'num': gift_info.get('gift_num', '') 
+        }
+        await update_lowest_floor()
+        
+    # تحديث السعر
+    elif ev_type == "listing.price_changed" and gift_id in active_listings and ev_data.get('asset') == 'TON':
+        active_listings[gift_id]['price'] = float(ev_data.get('price', 0))
+        await update_lowest_floor()
+        
+    # حذف الهدايا المباعة أو الملغاة
+    elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed", "premarket.listing_cancelled"]:
+        if gift_id in active_listings:
+            del active_listings[gift_id]
+            await update_lowest_floor()
+
+# جلب بيانات السوق المفقودة لضمان عمل البحث بدقة
+async def replay_events():
+    global last_event_id
+    url = "https://gifts.coffin.meme/api/marketplace/events"
+    while True:
+        params = {"limit": "500"}
+        if last_event_id: params["after"] = last_event_id
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=10) as resp:
+                    if resp.status == 400: # المؤشر منتهي الصلاحية، نبدأ من جديد
+                        last_event_id = ""
+                        continue
+                    if resp.status == 200:
+                        data = await resp.json()
+                        events = data.get('events', [])
+                        for ev in events:
+                            await consume_event(ev)
+                        if len(events) < 500: break # تم جلب جميع الصفحات
+                    else:
+                        break
+        except Exception:
+            break
+
+async def tonnel_websocket_loop():
+    # عند التشغيل، جلب الداتا القديمة اولاً لتهيئة قاعدة البيانات للبحث
+    await replay_events()
+    
     while True:
         try:
             async with websockets.connect(WS_URL, ping_interval=30) as websocket:
+                # محاولة جلب أي أحداث ضاعت أثناء انقطاع الاتصال
+                await replay_events()
+                
                 async for message in websocket:
                     try:
                         event = json.loads(message)
-                        ev_type = event.get('type')
-                        if ev_type == "marketplace.connected": continue
-                        ev_data = event.get('data', {})
-                        gift_id = ev_data.get('gift', {}).get('gift_id') if ev_data.get('gift') else ev_data.get('gift_id')
-                        if not gift_id: continue
-                        
-                        if ev_type == "listing.created" and ev_data.get('asset') == 'TON':
-                            active_listings[gift_id] = {
-                                'price': float(ev_data.get('price', 0)),
-                                'name': ev_data.get('gift', {}).get('gift_name', 'Unknown'),
-                                'num': ev_data.get('gift', {}).get('gift_num', '') 
-                            }
-                            await update_lowest_floor()
-                        elif ev_type == "listing.price_changed" and gift_id in active_listings and ev_data.get('asset') == 'TON':
-                            active_listings[gift_id]['price'] = float(ev_data.get('price', 0))
-                            await update_lowest_floor()
-                        elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed"]:
-                            if gift_id in active_listings:
-                                del active_listings[gift_id]
-                                await update_lowest_floor()
+                        if event.get('type') == "marketplace.connected": continue
+                        await consume_event(event)
                     except json.JSONDecodeError: pass
-        except Exception: await asyncio.sleep(3)
+        except Exception: 
+            await asyncio.sleep(3) # الانتظار قبل إعادة المحاولة
 
 
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
@@ -185,13 +221,12 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
         else: admin_msg += f"\nالرابط: <i>مجموعة خاصة (لا يوجد رابط عام)</i>"
             
         try:
-            # Send message to all admins
             for admin_id in ADMIN_IDS:
                 await context.bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode="HTML")
         except: pass
 
 # ==========================================
-# نظام فحص الحظر الذكي (يغلس على سوالف الكروب)
+# نظام فحص الحظر الذكي 
 # ==========================================
 async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.effective_user: return False
@@ -205,7 +240,6 @@ async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text = msg.text.lower()
         trigger_warning = False
         
-        # متى نعاقب المحظور ويرد عليه البوت؟
         if chat_type == 'private': trigger_warning = True
         elif text.startswith('/'): trigger_warning = True
         elif msg.reply_to_message and context.bot.id == msg.reply_to_message.from_user.id: trigger_warning = True
@@ -222,7 +256,7 @@ async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ]
             await send_custom_msg_banned(msg.chat_id, warning_msg, msg.message_id, extra_buttons=btn)
         
-        return True # محظور بالحالتين (سواء تم الرد عليه أو تغليس)
+        return True 
     return False
 
 # --- دوال الإرسال الشاملة ---
@@ -273,7 +307,7 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
         except Exception: pass
 
 # ==========================================
-# نظام الإلغاء الشامل (لجميع المحادثات)
+# نظام الإلغاء الشامل 
 # ==========================================
 async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
@@ -288,7 +322,7 @@ async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ==========================================
-# نظام الحظر (Ban & Unban Conversations)
+# نظام الحظر 
 # ==========================================
 async def process_ban(chat_id, msg_id, target_input, context):
     target_id, target_name = None, target_input
@@ -807,6 +841,7 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     found_gift_id = None
     found_gift_num = None
     
+    # البحث المباشر في قاعدة بيانات السوق التي جلبناها بالكامل
     for gift_id, data in active_listings.items():
         listing_name_clean = data['name'].lower().replace(' ', '')
         if clean_compare in listing_name_clean:
@@ -894,10 +929,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in ["فلور الهدايا", "فلور", "هدايا"]:
         msg = f"{GIFT_FLOOR_EMOJI} فلور الهدايا الحالي:\nالهدية: <b>{gift_floor['name']}</b>\nالسعر: <b>{gift_floor['price']}</b> GRAM"
-        btn = [
-            [{"text": "عرض في Tonnel", "url": gift_floor["url_tonnel"], "style": "success", "icon_custom_emoji_id": "5210956306952758910"}],
-            [{"text": "عرض في تيليجرام", "url": gift_floor["url_telegram"], "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}]
-        ]
+        btn = []
+        if gift_floor.get('url_tonnel'):
+            btn.append([{"text": "عرض في Tonnel", "url": gift_floor["url_tonnel"], "style": "success", "icon_custom_emoji_id": "5210956306952758910"}])
+        if gift_floor.get('url_telegram'):
+            btn.append([{"text": "عرض في تيليجرام", "url": gift_floor["url_telegram"], "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}])
+            
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, extra_buttons=btn)
         return
 
