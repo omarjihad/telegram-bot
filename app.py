@@ -171,6 +171,25 @@ async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in bot_users: bot_users.add(user.id)
     if user.username: user_mapping[user.username.lower()] = user.id
 
+async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = update.my_chat_member
+    if result.new_chat_member.status in ["member", "administrator"] and result.old_chat_member.status not in ["member", "administrator"]:
+        chat = result.chat
+        msg = f"تم تشغيل البوت اكتب الاوامر او اوامر لعرض الشرح {HELLO_EMOJI}"
+        try:
+            await send_custom_msg(chat.id, msg)
+        except: pass
+        
+        admin_msg = f"{WHALE_BELL} <b>تم إضافة البوت إلى مجموعة جديدة!</b>\nالاسم: {html.escape(chat.title)}\nالآيدي: <code>{chat.id}</code>"
+        if chat.username: admin_msg += f"\nالرابط: https://t.me/{chat.username}"
+        else: admin_msg += f"\nالرابط: <i>مجموعة خاصة (لا يوجد رابط عام)</i>"
+            
+        try:
+            # Send message to all admins
+            for admin_id in ADMIN_IDS:
+                await context.bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode="HTML")
+        except: pass
+
 # ==========================================
 # نظام فحص الحظر الذكي (يغلس على سوالف الكروب)
 # ==========================================
