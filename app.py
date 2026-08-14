@@ -49,7 +49,8 @@ active_listings = {}
 
 gift_floor = {
     "price": 0.0, 
-    "url": "https://t.me/nft", 
+    "url_tonnel": "https://t.me/tonnel_network_bot", 
+    "url_telegram": "https://t.me/nft",
     "name": "جاري التحديث..."
 }
 
@@ -100,14 +101,17 @@ async def update_lowest_floor():
     gift_floor['price'] = lowest_data['price']
     gift_floor['name'] = lowest_data['name']
     
-    # بناء الرابط باستخدام رقم الهدية الحقيقي في التليجرام (gift_num)
     clean_url_name = lowest_data['name'].lower().replace(' ', '')
     gift_num = lowest_data.get('num', '')
     
+    # 1. رابط الهدية في Tonnel باستخدام ID الماركت
+    gift_floor['url_tonnel'] = f"https://t.me/tonnel_network_bot/gift?startapp={lowest_gift_id}"
+    
+    # 2. رابط الهدية في Telegram باستخدام رقم الهدية الحقيقي
     if gift_num:
-        gift_floor['url'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
+        gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
     else:
-        gift_floor['url'] = f"https://t.me/nft/{clean_url_name}"
+        gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
 
 async def tonnel_websocket_loop():
     global active_listings
@@ -127,7 +131,7 @@ async def tonnel_websocket_loop():
                                 active_listings[gift_id] = {
                                     'price': float(ev_data.get('price', 0)),
                                     'name': ev_data.get('gift', {}).get('gift_name', 'Unknown'),
-                                    'num': ev_data.get('gift', {}).get('gift_num', '') # حفظ رقم الهدية الحقيقي
+                                    'num': ev_data.get('gift', {}).get('gift_num', '') 
                                 }
                     await update_lowest_floor()
     except Exception as e:
@@ -154,7 +158,7 @@ async def tonnel_websocket_loop():
                                 active_listings[gift_id] = {
                                     'price': float(ev_data.get('price', 0)),
                                     'name': ev_data.get('gift', {}).get('gift_name', 'Unknown'),
-                                    'num': ev_data.get('gift', {}).get('gift_num', '') # حفظ رقم الهدية الحقيقي
+                                    'num': ev_data.get('gift', {}).get('gift_num', '') 
                                 }
                                 await update_lowest_floor()
                                 
@@ -658,10 +662,10 @@ async def post_init(app: Application):
     asyncio.create_task(tonnel_websocket_loop()) 
 
 # ==========================================
-# نظام بحث الهدايا
+# نظام بحث الهدايا المحدث
 # ==========================================
 async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = f"{SEARCH_EMOJI} <b>بحث عن هدية</b>\n\nأرسل اسم الهدية (مثال: plushpepe) أو رابطها (مثال: t.me/nft/plushpepe-1) للبحث عن أقل سعر لها في السوق:"
+    msg = f"{SEARCH_EMOJI} <b>بحث عن هدية</b>\n\nأرسل اسم الهدية (مثال: plushpepe) أو رابطها للبحث عن أقل سعر لها في السوق:"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
     return ASK_GIFT_SEARCH
 
@@ -670,30 +674,33 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.message.chat_id
     msg_id = update.message.message_id
     
-    # تنظيف المدخل
+    # استخراج الاسم بدقة سواء كان رابط تليجرام أو Fragment أو اسم عادي
     if 't.me/nft/' in query or 'fragment.com' in query:
-        match = re.search(r'nft/([a-zA-Z0-9_]+)(?:-\d+)?', query)
+        match = re.search(r'nft/([a-zA-Z0-9_]+)', query)
         if match:
-            query = match.group(1).replace('-', ' ')
+            query = match.group(1)
             
+    # تنظيف الاسم من الأرقام في النهاية
     clean_query = re.sub(r'-\d+$', '', query).replace(' ', '').lower()
     
     msg_wait = await send_custom_msg(chat_id, f"جاري البحث عن <b>{clean_query}</b>... {SEARCH_EMOJI}", msg_id)
     
     found_price = None
     found_name = clean_query
+    found_gift_id = None
     found_gift_num = None
     
-    # البحث بتطابق دقيق (Exact Match) في الـ WebSocket
+    # 1. البحث في الـ WebSocket (الأسرع والأحدث)
     for gift_id, data in active_listings.items():
         listing_name = data['name'].lower().replace(' ', '')
         if clean_query == listing_name:
             if found_price is None or data['price'] < found_price:
                 found_price = data['price']
                 found_name = data['name']
+                found_gift_id = gift_id
                 found_gift_num = data.get('num', '')
                 
-    # إذا لم نجدها، نبحث باستخدام API GetGems
+    # 2. إذا لم يتم العثور عليها، البحث في GetGems
     if found_price is None:
         try:
             search_url = f"https://api.getgems.io/graphql"
@@ -711,7 +718,8 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                         
                         for item in items:
                             item_name = item.get("name", "").lower().replace(' ', '')
-                            if clean_query in item_name and item.get("sale"):
+                            # تطابق دقيق للاسم
+                            if clean_query == item_name and item.get("sale"):
                                 price_nano = float(item["sale"].get("fullPrice", 0))
                                 current_price = price_nano / 1e9
                                 
@@ -724,20 +732,22 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             
     if found_price is not None and found_price > 0:
         clean_url_name = found_name.lower().replace(' ', '')
-        # بناء الرابط برقم الهدية الفعلي في التليجرام
+        
+        # إنشاء الأزرار المزدوجة لنتيجة البحث
+        btn = []
+        if found_gift_id:
+            url_tonnel = f"https://t.me/tonnel_network_bot/gift?startapp={found_gift_id}"
+            btn.append({"text": "عرض في Tonnel", "url": url_tonnel, "style": "success", "icon_custom_emoji_id": "5210956306952758910"})
+        
         if found_gift_num:
-            gift_url = f"https://t.me/nft/{clean_url_name}-{found_gift_num}"
+            url_telegram = f"https://t.me/nft/{clean_url_name}-{found_gift_num}"
         else:
-            gift_url = f"https://t.me/nft/{clean_url_name}"
+            url_telegram = f"https://t.me/nft/{clean_url_name}"
+            
+        btn.append({"text": "عرض في تيليجرام", "url": url_telegram, "style": "primary", "icon_custom_emoji_id": "5411597774359653692"})
             
         msg = f"{GIFT_FLOOR_EMOJI} نتيجة البحث:\nالهدية: <b>{found_name}</b>\nأقل سعر: <b>{found_price:g}</b> GRAM"
-        btn = [[{
-            "text": "عرض الهدية", 
-            "url": gift_url, 
-            "style": "success", 
-            "icon_custom_emoji_id": "5210956306952758910"
-        }]]
-        await edit_custom_msg(chat_id, msg_wait, msg, extra_buttons=btn)
+        await edit_custom_msg(chat_id, msg_wait, msg, extra_buttons=[btn])
     else:
         await edit_custom_msg(chat_id, msg_wait, f"عذراً، لم أتمكن من العثور على هدية بهذا الاسم معروضة للبيع حالياً. {FAIL_EMOJI}")
         
@@ -779,13 +789,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in ["فلور الهدايا", "فلور", "هدايا"]:
         msg = f"{GIFT_FLOOR_EMOJI} فلور الهدايا الحالي:\nالهدية: <b>{gift_floor['name']}</b>\nالسعر: <b>{gift_floor['price']:g}</b> GRAM"
-        btn = [[{
-            "text": "عرض الهدية", 
-            "url": gift_floor["url"], 
-            "style": "success", 
-            "icon_custom_emoji_id": "5210956306952758910"
-        }]]
-        await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, extra_buttons=btn)
+        # الأزرار المزدوجة لفلور الهدايا العام
+        btn = [
+            {"text": "عرض في Tonnel", "url": gift_floor["url_tonnel"], "style": "success", "icon_custom_emoji_id": "5210956306952758910"},
+            {"text": "عرض في تيليجرام", "url": gift_floor["url_telegram"], "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}
+        ]
+        await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id, extra_buttons=[btn])
         return
 
     if text in ["رصيدي", "/رصيدي", "رص", "/رص"]:
