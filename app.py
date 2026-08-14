@@ -262,7 +262,7 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
         try: await session.post(url, json=payload, timeout=10)
         except Exception: pass
 
-# --- أوامر الحظر ---
+# --- أوامر الحظر (للاحتياط عبر CommandHandler) ---
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     if user_id not in ADMIN_IDS: return
@@ -779,7 +779,7 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     found_gift_id = None
     found_gift_num = None
     
-    # البحث الشامل في الـ WebSocket (يشمل المقفول والمفتوح)
+    # البحث الشامل في الـ WebSocket 
     for gift_id, data in active_listings.items():
         listing_name_clean = data['name'].lower().replace(' ', '')
         if clean_compare in listing_name_clean:
@@ -851,6 +851,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await track_new_user(update.effective_user, context)
     if await is_user_banned(update): return
+
+    # --- معالجة أوامر الحظر بشكل مباشر ---
+    if text.startswith("حظر") or text.startswith("/ban"):
+        if user_id not in ADMIN_IDS: return
+        target_id = None
+        target_name = "المستخدم"
+        
+        if update.message.reply_to_message:
+            target_id = update.message.reply_to_message.from_user.id
+            target_name = update.message.reply_to_message.from_user.first_name
+        else:
+            parts = original_text.split()
+            if len(parts) > 1:
+                arg = parts[1]
+                if arg.startswith('@'):
+                    username = arg.replace('@', '').lower()
+                    if username in user_mapping:
+                        target_id = user_mapping[username]
+                        target_name = arg
+                elif arg.isdigit():
+                    target_id = int(arg)
+                    target_name = str(target_id)
+        
+        if target_id:
+            if target_id in ADMIN_IDS:
+                await send_custom_msg(chat_id, f"عذراً، لا يمكنك حظر المطورين! {WARN_EMOJI}", msg_id)
+            else:
+                banned_users.add(target_id)
+                await send_custom_msg(chat_id, f"✅ تم حظر {target_name} بنجاح ولن يتمكن من استخدام البوت.", msg_id)
+        else:
+            await send_custom_msg(chat_id, f"يرجى الرد على رسالة الشخص أو كتابة يوزره أو الايدي الخاص به.\nمثال: `حظر @username`", msg_id)
+        return
+
+    if text.startswith("الغاء الحظر") or text.startswith("الغاء حظر") or text.startswith("/unban"):
+        if user_id not in ADMIN_IDS: return
+        target_id = None
+        
+        if update.message.reply_to_message:
+            target_id = update.message.reply_to_message.from_user.id
+        else:
+            parts = original_text.split()
+            if len(parts) > 1:
+                arg = parts[1]
+                if arg.startswith('@'):
+                    username = arg.replace('@', '').lower()
+                    if username in user_mapping: target_id = user_mapping[username]
+                elif arg.isdigit():
+                    target_id = int(arg)
+                    
+        if target_id and target_id in banned_users:
+            banned_users.remove(target_id)
+            await send_custom_msg(chat_id, f"✅ تم فك الحظر بنجاح.", msg_id)
+        else:
+            await send_custom_msg(chat_id, f"المستخدم غير محظور أو لم يتم العثور عليه. {WARN_EMOJI}", msg_id)
+        return
 
     forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
     if any(word in text.split() for word in forbidden): return
