@@ -40,8 +40,8 @@ alerts_db = []
 user_wallets = {} 
 bot_users = set() 
 whale_alert_users = {} 
-banned_users = set() # قائمة المحظورين
-user_mapping = {} # لتتبع اليوزرات وتحويلها لآيديات للحظر
+banned_users = set() 
+user_mapping = {} 
 
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
@@ -112,6 +112,7 @@ async def update_lowest_floor():
 
 async def tonnel_websocket_loop():
     global active_listings
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://gifts.coffin.meme/api/marketplace/events?limit=500", timeout=10) as resp:
@@ -123,7 +124,9 @@ async def tonnel_websocket_loop():
                         ev_data = event.get('data', {})
                         gift_id = ev_data.get('gift', {}).get('gift_id') if ev_data.get('gift') else ev_data.get('gift_id')
                         if not gift_id: continue
-                        if ev_type == "listing.created" and ev_data.get('asset') == 'TON':
+                        
+                        # دعم الهدايا العادية والمقفولة (Premarket)
+                        if ev_type in ["listing.created", "premarket.listing_created"] and ev_data.get('asset') == 'TON':
                             active_listings[gift_id] = {
                                 'price': float(ev_data.get('price', 0)),
                                 'name': ev_data.get('gift', {}).get('gift_name', 'Unknown'),
@@ -131,15 +134,17 @@ async def tonnel_websocket_loop():
                             }
                         elif ev_type == "listing.price_changed" and gift_id in active_listings and ev_data.get('asset') == 'TON':
                             active_listings[gift_id]['price'] = float(ev_data.get('price', 0))
-                        elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed"]:
+                        elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed", "premarket.listing_cancelled"]:
                             if gift_id in active_listings:
                                 del active_listings[gift_id]
+                                
                     await update_lowest_floor()
     except Exception: pass
 
     while True:
         try:
             async with websockets.connect(WS_URL, ping_interval=30) as websocket:
+                print("✅ المتصل بـ Tonnel WebSocket")
                 async for message in websocket:
                     try:
                         event = json.loads(message)
@@ -149,7 +154,7 @@ async def tonnel_websocket_loop():
                         gift_id = ev_data.get('gift', {}).get('gift_id') if ev_data.get('gift') else ev_data.get('gift_id')
                         if not gift_id: continue
                         
-                        if ev_type == "listing.created" and ev_data.get('asset') == 'TON':
+                        if ev_type in ["listing.created", "premarket.listing_created"] and ev_data.get('asset') == 'TON':
                             active_listings[gift_id] = {
                                 'price': float(ev_data.get('price', 0)),
                                 'name': ev_data.get('gift', {}).get('gift_name', 'Unknown'),
@@ -159,7 +164,7 @@ async def tonnel_websocket_loop():
                         elif ev_type == "listing.price_changed" and gift_id in active_listings and ev_data.get('asset') == 'TON':
                             active_listings[gift_id]['price'] = float(ev_data.get('price', 0))
                             await update_lowest_floor()
-                        elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed"]:
+                        elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed", "premarket.listing_cancelled"]:
                             if gift_id in active_listings:
                                 del active_listings[gift_id]
                                 await update_lowest_floor()
@@ -190,6 +195,7 @@ async def is_user_banned(update: Update) -> bool:
         await send_custom_msg_banned(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn)
         return True
     return False
+
 
 # --- دوال الإرسال الشاملة ---
 # الدالة المخصصة لرسالة الحظر (لون زر أخبار الهدايا أزرق)
@@ -285,7 +291,7 @@ async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         banned_users.add(target_id)
         await send_custom_msg(update.message.chat_id, f"✅ تم حظر {target_name} بنجاح ولن يتمكن من استخدام البوت.", update.message.message_id)
     else:
-        await send_custom_msg(update.message.chat_id, f"يرجى الرد على رسالة الشخص أو كتابة يوزره أو الايدي الخاص به.\nمثال: `/ban @username`", update.message.message_id)
+        await send_custom_msg(update.message.chat_id, f"يرجى الرد على رسالة الشخص أو كتابة يوزره أو الايدي الخاص به.\nمثال: `/ban @username` أو `/ban 123456789`", update.message.message_id)
 
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -773,6 +779,7 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     found_gift_id = None
     found_gift_num = None
     
+    # البحث الشامل في الـ WebSocket (يشمل المقفول والمفتوح)
     for gift_id, data in active_listings.items():
         listing_name_clean = data['name'].lower().replace(' ', '')
         if clean_compare in listing_name_clean:
@@ -782,6 +789,7 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                 found_gift_id = gift_id
                 found_gift_num = data.get('num', '')
                 
+    # إذا ما لكاها يروح للـ GetGems المتخصص
     if found_price is None:
         try:
             search_url = f"https://api.getgems.io/graphql"
