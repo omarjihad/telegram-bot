@@ -24,7 +24,7 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
 
-# --- قائمة المطورين (أنت والمطور الثاني) ---
+# --- قائمة المطورين ---
 ADMIN_IDS = [7126816492, 1955081272]
 
 # نظام الكاش والبيانات
@@ -53,8 +53,8 @@ ASK_UNBAN = 6
 # --- متغيرات Tonnel Marketplace ---
 WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
 active_listings = {}
-seen_events = set() # لمنع تكرار الأحداث ومعالجة التعليق
-last_event_id = "" # لحفظ آخر حدث لتشغيل الـ Replay بشكل صحيح
+seen_events = set() 
+last_event_id = "" 
 
 gift_floor = {
     "price": "0", 
@@ -95,7 +95,7 @@ def format_exact_price(price):
     return f"{price:.6f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# دالة الاتصال بـ Tonnel WebSocket ونظام Replay الشامل
+# دالة الاتصال بـ Tonnel WebSocket ونظام Replay المصلح
 # ==========================================
 async def update_lowest_floor():
     global gift_floor
@@ -117,48 +117,49 @@ async def update_lowest_floor():
     if gift_num: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
     else: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
 
-# معالجة كل حدث بشكل منفصل وموثوق
+# معالجة الأحداث (تم إصلاح نظام التتبع لتفادي التجميد)
 async def consume_event(event):
     global active_listings, last_event_id, seen_events
     
     ev_id = event.get('eventId')
-    if not ev_id or ev_id in seen_events: return
+    if not ev_id: return
+    
+    # تحديث المؤشر فوراً لمنع الـ Infinite Loop
+    last_event_id = ev_id
+    
+    if ev_id in seen_events: return
     
     seen_events.add(ev_id)
-    if len(seen_events) > 50000: seen_events.clear() # تنظيف الذاكرة لمنع الضغط
+    if len(seen_events) > 50000: seen_events.clear()
     
-    last_event_id = ev_id
     ev_type = event.get('type')
     ev_data = event.get('data', {})
     
-    # محاولة استخراج معلومات الهدية بأي شكل مدعوم
     gift_info = ev_data.get('gift')
     if not gift_info and 'gift_id' in ev_data: gift_info = ev_data
     gift_id = gift_info.get('gift_id') if gift_info else None
     
     if not gift_id: return
 
-    # إضافة الهدايا العادية والمقفولة (Premarket)
-    if ev_type in ["listing.created", "premarket.listing_created"] and ev_data.get('asset') == 'TON':
-        active_listings[gift_id] = {
-            'price': float(ev_data.get('price', 0)),
-            'name': gift_info.get('gift_name', 'Unknown'),
-            'num': gift_info.get('gift_num', '') 
-        }
-        await update_lowest_floor()
-        
-    # تحديث السعر
-    elif ev_type == "listing.price_changed" and gift_id in active_listings and ev_data.get('asset') == 'TON':
-        active_listings[gift_id]['price'] = float(ev_data.get('price', 0))
-        await update_lowest_floor()
-        
+    # تضمين جميع الأحداث التي تظهر السعر لإضافتها (لحل مشكلة الأسعار القديمة)
+    if ev_type in ["listing.created", "premarket.listing_created", "listing.price_changed"]:
+        if ev_data.get('asset') == 'TON':
+            active_listings[gift_id] = {
+                'price': float(ev_data.get('price', 0)),
+                'name': gift_info.get('gift_name', 'Unknown'),
+                'num': gift_info.get('gift_num', '') 
+            }
+            await update_lowest_floor()
+        elif gift_id in active_listings:
+            del active_listings[gift_id]
+            await update_lowest_floor()
+            
     # حذف الهدايا المباعة أو الملغاة
     elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed", "premarket.listing_cancelled"]:
         if gift_id in active_listings:
             del active_listings[gift_id]
             await update_lowest_floor()
 
-# جلب بيانات السوق المفقودة لضمان عمل البحث بدقة
 async def replay_events():
     global last_event_id
     url = "https://gifts.coffin.meme/api/marketplace/events"
@@ -169,7 +170,7 @@ async def replay_events():
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, timeout=10) as resp:
-                    if resp.status == 400: # المؤشر منتهي الصلاحية، نبدأ من جديد
+                    if resp.status == 400:
                         last_event_id = ""
                         continue
                     if resp.status == 200:
@@ -177,20 +178,18 @@ async def replay_events():
                         events = data.get('events', [])
                         for ev in events:
                             await consume_event(ev)
-                        if len(events) < 500: break # تم جلب جميع الصفحات
+                        if len(events) < 500: break 
                     else:
                         break
         except Exception:
             break
 
 async def tonnel_websocket_loop():
-    # عند التشغيل، جلب الداتا القديمة اولاً لتهيئة قاعدة البيانات للبحث
     await replay_events()
     
     while True:
         try:
             async with websockets.connect(WS_URL, ping_interval=30) as websocket:
-                # محاولة جلب أي أحداث ضاعت أثناء انقطاع الاتصال
                 await replay_events()
                 
                 async for message in websocket:
@@ -200,7 +199,7 @@ async def tonnel_websocket_loop():
                         await consume_event(event)
                     except json.JSONDecodeError: pass
         except Exception: 
-            await asyncio.sleep(3) # الانتظار قبل إعادة المحاولة
+            await asyncio.sleep(3)
 
 
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
@@ -1002,7 +1001,6 @@ def main():
     t_request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0, write_timeout=60.0)
     app = (Application.builder().token(TOKEN).request(t_request).post_init(post_init).build())
     
-    # القوائم والازرار العامة للالغي
     cancel_handlers = [
         MessageHandler(filters.Regex(r'^(الغاء|/cancel)$'), cancel_action),
         CallbackQueryHandler(cancel_action, pattern="^cancel$")
@@ -1055,7 +1053,6 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
     
-    # القراءة العامة للرسائل
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     app.add_error_handler(error_handler)
     
