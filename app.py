@@ -13,7 +13,6 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes, ChatMemberHandler
 from telegram.request import HTTPXRequest
-import urllib.parse
 
 # إخفاء اللوجات المزعجة
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -55,6 +54,7 @@ WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
 active_listings = {}
 seen_events = set() 
 last_event_id = "" 
+needs_floor_update = False # متغير لمنع الاختناق البرمجي
 
 gift_floor = {
     "price": "0", 
@@ -87,7 +87,7 @@ USDT_CASH = '<tg-emoji emoji-id="5213170203680060059">💵</tg-emoji>'
 HELLO_EMOJI = '<tg-emoji emoji-id="5800769433974611462">👋</tg-emoji>'
 NUM_EMOJIS = {1: '1️⃣', 2: '2️⃣', 3: '3️⃣', 4: '4️⃣', 5: '5️⃣', 6: '6️⃣'}
 
-# زر الإلغاء الشامل (تم التعديل للون الأزرق primary)
+# زر الإلغاء الشامل باللون الأزرق
 CANCEL_BTN = [{"text": "الغاء", "callback_data": "cancel", "style": "primary", "icon_custom_emoji_id": "5440681540541502133"}]
 
 def format_exact_price(price):
@@ -95,42 +95,47 @@ def format_exact_price(price):
     return f"{price:.6f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# دالة الاتصال بـ Tonnel WebSocket ونظام Replay المصلح
+# نظام تحديث السعر المعزول (يمنع تعليق البوت)
 # ==========================================
-async def update_lowest_floor():
-    global gift_floor
-    if not active_listings: 
-        gift_floor['price'] = "0"
-        gift_floor['name'] = "جاري التحديث..."
-        return
-        
-    lowest_gift_id = min(active_listings, key=lambda k: active_listings[k]['price'])
-    lowest_data = active_listings[lowest_gift_id]
-    
-    gift_floor['price'] = format_exact_price(lowest_data['price'])
-    gift_floor['name'] = lowest_data['name']
-    
-    clean_url_name = lowest_data['name'].lower().replace(' ', '')
-    gift_num = lowest_data.get('num', '')
-    
-    gift_floor['url_tonnel'] = f"https://t.me/tonnel_network_bot/gift?startapp={lowest_gift_id}"
-    if gift_num: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
-    else: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
+async def floor_updater_loop():
+    global needs_floor_update, gift_floor, active_listings
+    while True:
+        await asyncio.sleep(2) # تحديث كل ثانيتين لضمان عدم اختناق السيرفر
+        if needs_floor_update:
+            needs_floor_update = False
+            if active_listings:
+                try:
+                    lowest_gift_id = min(active_listings, key=lambda k: active_listings[k]['price'])
+                    lowest_data = active_listings[lowest_gift_id]
+                    
+                    gift_floor['price'] = format_exact_price(lowest_data['price'])
+                    gift_floor['name'] = lowest_data['name']
+                    
+                    clean_url_name = lowest_data['name'].lower().replace(' ', '')
+                    gift_num = lowest_data.get('num', '')
+                    
+                    gift_floor['url_tonnel'] = f"https://t.me/tonnel_network_bot/gift?startapp={lowest_gift_id}"
+                    if gift_num: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
+                    else: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
+                except Exception:
+                    pass
+            else:
+                gift_floor['price'] = "0"
+                gift_floor['name'] = "لا توجد هدايا معروضة"
 
-# معالجة الأحداث (تم إصلاح نظام التتبع لتفادي التجميد)
+# ==========================================
+# دالة الاتصال بـ Tonnel WebSocket ونظام Replay السريع
+# ==========================================
 async def consume_event(event):
-    global active_listings, last_event_id, seen_events
+    global active_listings, last_event_id, seen_events, needs_floor_update
     
     ev_id = event.get('eventId')
     if not ev_id: return
-    
-    # تحديث المؤشر فوراً لمنع الـ Infinite Loop
     last_event_id = ev_id
     
     if ev_id in seen_events: return
-    
     seen_events.add(ev_id)
-    if len(seen_events) > 50000: seen_events.clear()
+    if len(seen_events) > 20000: seen_events.clear()
     
     ev_type = event.get('type')
     ev_data = event.get('data', {})
@@ -141,7 +146,7 @@ async def consume_event(event):
     
     if not gift_id: return
 
-    # تضمين جميع الأحداث التي تظهر السعر لإضافتها (لحل مشكلة الأسعار القديمة)
+    # إضافة وتحديث الهدايا (شاملة الـ Premarket والتخفيضات)
     if ev_type in ["listing.created", "premarket.listing_created", "listing.price_changed"]:
         if ev_data.get('asset') == 'TON':
             active_listings[gift_id] = {
@@ -149,16 +154,13 @@ async def consume_event(event):
                 'name': gift_info.get('gift_name', 'Unknown'),
                 'num': gift_info.get('gift_num', '') 
             }
-            await update_lowest_floor()
-        elif gift_id in active_listings:
-            del active_listings[gift_id]
-            await update_lowest_floor()
+            needs_floor_update = True
             
-    # حذف الهدايا المباعة أو الملغاة
-    elif ev_type in ["listing.cancelled", "sale.completed", "auction.finished", "premarket.sale_completed", "premarket.listing_cancelled"]:
+    # حذف الهدايا المباعة أو الملغاة فوراً
+    elif ev_type in ["listing.cancelled", "premarket.listing_cancelled", "sale.completed", "premarket.sale_completed", "auction.finished"]:
         if gift_id in active_listings:
             del active_listings[gift_id]
-            await update_lowest_floor()
+            needs_floor_update = True
 
 async def replay_events():
     global last_event_id
@@ -183,14 +185,17 @@ async def replay_events():
                         break
         except Exception:
             break
+        await asyncio.sleep(0.5) # يمنع حظر الـ IP ويسمح للبوت بالعمل بحرية
 
 async def tonnel_websocket_loop():
+    # جلب الأحداث السابقة أولاً لتعبئة البيانات
     await replay_events()
     
     while True:
         try:
-            async with websockets.connect(WS_URL, ping_interval=30) as websocket:
-                await replay_events()
+            # ربط مستقر ومقاوم للانقطاع
+            async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as websocket:
+                await replay_events() # جلب ما ضاع أثناء الانقطاع
                 
                 async for message in websocket:
                     try:
@@ -198,7 +203,8 @@ async def tonnel_websocket_loop():
                         if event.get('type') == "marketplace.connected": continue
                         await consume_event(event)
                     except json.JSONDecodeError: pass
-        except Exception: 
+        except Exception as e: 
+            print(f"WebSocket reconnecting... {e}")
             await asyncio.sleep(3)
 
 
@@ -809,6 +815,7 @@ async def post_init(app: Application):
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
     asyncio.create_task(tonnel_websocket_loop()) 
+    asyncio.create_task(floor_updater_loop()) # تم إضافة لوب التحديث المعزول هنا
 
 # ==========================================
 # نظام بحث الهدايا الدقيق والشامل
@@ -840,7 +847,7 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     found_gift_id = None
     found_gift_num = None
     
-    # البحث المباشر في قاعدة بيانات السوق التي جلبناها بالكامل
+    # البحث المباشر والموثوق في الذاكرة (التي أصبحت تحدث لحظياً دون توقف)
     for gift_id, data in active_listings.items():
         listing_name_clean = data['name'].lower().replace(' ', '')
         if clean_compare in listing_name_clean:
