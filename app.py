@@ -256,8 +256,8 @@ async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if trigger_warning:
             warning_msg = 'دروح عمو روح خل واحد من المطورين يفك الحظر منك عود تعال <tg-emoji emoji-id="5872697861166075790">🚫</tg-emoji>'
             btn = [
-                [{"text": "الروسي", "url": "https://t.me/M6M9N", "style": "success", "icon_custom_emoji_id": "5372930329822659547"}],
-                [{"text": "ساسكي", "url": "https://t.me/O1916", "style": "danger", "icon_custom_emoji_id": "5258021357446268553"}]
+                [{"text": "الروسي", "url": "https://t.me/M6M9N", "style": "success", "icon_custom_emoji_id": "5375412988423470297"}],
+                [{"text": "ساسكي", "url": "https://t.me/O1916", "style": "danger", "icon_custom_emoji_id": "5373011380150501346"}]
             ]
             await send_custom_msg_banned(msg.chat_id, warning_msg, msg.message_id, extra_buttons=btn)
         
