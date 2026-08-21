@@ -25,6 +25,7 @@ TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
 
 # --- قائمة المطورين ---
 ADMIN_IDS = [7126816492, 1955081272]
+DB_FILE = "tonnel_db.json"
 
 # نظام الكاش والبيانات
 CACHE_TIME = 2
@@ -49,12 +50,12 @@ ASK_GIFT_SEARCH = 4
 ASK_BAN = 5
 ASK_UNBAN = 6
 
-# --- متغيرات Tonnel Marketplace ---
+# --- متغيرات السوق وقاعدة البيانات ---
 WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
 active_listings = {}
-seen_events = set() 
-last_event_id = "" 
-needs_floor_update = False # متغير لمنع الاختناق البرمجي
+last_event_id = ""
+seen_events = set()
+needs_db_save = False
 
 gift_floor = {
     "price": "0", 
@@ -87,7 +88,6 @@ USDT_CASH = '<tg-emoji emoji-id="5213170203680060059">💵</tg-emoji>'
 HELLO_EMOJI = '<tg-emoji emoji-id="5800769433974611462">👋</tg-emoji>'
 NUM_EMOJIS = {1: '1️⃣', 2: '2️⃣', 3: '3️⃣', 4: '4️⃣', 5: '5️⃣', 6: '6️⃣'}
 
-# زر الإلغاء الشامل باللون الأزرق
 CANCEL_BTN = [{"text": "الغاء", "callback_data": "cancel", "style": "primary", "icon_custom_emoji_id": "5440681540541502133"}]
 
 def format_exact_price(price):
@@ -95,58 +95,84 @@ def format_exact_price(price):
     return f"{price:.6f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# نظام تحديث السعر المعزول (يمنع تعليق البوت)
+# إدارة قاعدة بيانات السوق المحلية
 # ==========================================
+def load_market_db():
+    global active_listings, last_event_id
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                active_listings = data.get('listings', {})
+                last_event_id = data.get('last_event_id', "")
+                print(f"✅ تم تحميل السوق: {len(active_listings)} هدية، الحدث الأخير: {last_event_id}")
+        except:
+            print("⚠️ خطأ في قراءة قاعدة بيانات السوق، سيتم البدء من جديد.")
+            active_listings = {}
+            last_event_id = ""
+
+def save_market_db():
+    try:
+        with open(DB_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'last_event_id': last_event_id, 'listings': active_listings}, f)
+    except: pass
+
 async def floor_updater_loop():
-    global needs_floor_update, gift_floor, active_listings
+    global needs_db_save, gift_floor, active_listings
     while True:
-        await asyncio.sleep(2) # تحديث كل ثانيتين لضمان عدم اختناق السيرفر
-        if needs_floor_update:
-            needs_floor_update = False
+        await asyncio.sleep(3) 
+        if needs_db_save:
+            needs_db_save = False
+            
+            # تحديث الفلور
             if active_listings:
                 try:
-                    lowest_gift_id = min(active_listings, key=lambda k: active_listings[k]['price'])
-                    lowest_data = active_listings[lowest_gift_id]
-                    
-                    gift_floor['price'] = format_exact_price(lowest_data['price'])
-                    gift_floor['name'] = lowest_data['name']
-                    
-                    clean_url_name = lowest_data['name'].lower().replace(' ', '')
-                    gift_num = lowest_data.get('num', '')
-                    
-                    gift_floor['url_tonnel'] = f"https://t.me/tonnel_network_bot/gift?startapp={lowest_gift_id}"
-                    if gift_num: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
-                    else: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
-                except Exception:
-                    pass
+                    # تحويل الأسعار المخزنة لنصوص إلى أرقام للمقارنة
+                    valid_listings = {k: v for k, v in active_listings.items() if float(v.get('price', 0)) > 0}
+                    if valid_listings:
+                        lowest_gift_id = min(valid_listings, key=lambda k: float(valid_listings[k]['price']))
+                        lowest_data = valid_listings[lowest_gift_id]
+                        
+                        gift_floor['price'] = format_exact_price(float(lowest_data['price']))
+                        gift_floor['name'] = lowest_data['name']
+                        
+                        clean_url_name = lowest_data['name'].lower().replace(' ', '')
+                        gift_num = lowest_data.get('num', '')
+                        
+                        gift_floor['url_tonnel'] = f"https://t.me/tonnel_network_bot/gift?startapp={lowest_gift_id}"
+                        if gift_num: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
+                        else: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
+                except Exception as e: pass
             else:
                 gift_floor['price'] = "0"
                 gift_floor['name'] = "لا توجد هدايا معروضة"
+                
+            # حفظ التغييرات بالملف
+            save_market_db()
 
 # ==========================================
-# دالة الاتصال بـ Tonnel WebSocket ونظام Replay السريع
+# دالة الاتصال بـ Tonnel ومعالجة الأحداث
 # ==========================================
-async def consume_event(event):
-    global active_listings, last_event_id, seen_events, needs_floor_update
+async def process_event(event):
+    global active_listings, last_event_id, seen_events, needs_db_save
     
     ev_id = event.get('eventId')
     if not ev_id: return
-    last_event_id = ev_id
     
     if ev_id in seen_events: return
     seen_events.add(ev_id)
-    if len(seen_events) > 20000: seen_events.clear()
+    if len(seen_events) > 10000: seen_events.clear()
     
     ev_type = event.get('type')
     ev_data = event.get('data', {})
     
     gift_info = ev_data.get('gift')
     if not gift_info and 'gift_id' in ev_data: gift_info = ev_data
-    gift_id = gift_info.get('gift_id') if gift_info else None
+    gift_id = str(gift_info.get('gift_id')) if gift_info else None
     
     if not gift_id: return
 
-    # إضافة وتحديث الهدايا (شاملة الـ Premarket والتخفيضات)
+    # حسب تعليمات الـ Docs: إضافة وتحديث السعر
     if ev_type in ["listing.created", "premarket.listing_created", "listing.price_changed"]:
         if ev_data.get('asset') == 'TON':
             active_listings[gift_id] = {
@@ -154,13 +180,17 @@ async def consume_event(event):
                 'name': gift_info.get('gift_name', 'Unknown'),
                 'num': gift_info.get('gift_num', '') 
             }
-            needs_floor_update = True
+            needs_db_save = True
             
-    # حذف الهدايا المباعة أو الملغاة فوراً
-    elif ev_type in ["listing.cancelled", "premarket.listing_cancelled", "sale.completed", "premarket.sale_completed", "auction.finished"]:
+    # حسب تعليمات الـ Docs: الحذف عند الإلغاء أو البيع
+    # الاعتماد على sale.completed بدلاً من auction.finished للبيوع
+    elif ev_type in ["listing.cancelled", "premarket.listing_cancelled", "sale.completed", "premarket.sale_completed", "auction.cancelled"]:
         if gift_id in active_listings:
             del active_listings[gift_id]
-            needs_floor_update = True
+            needs_db_save = True
+            
+    # تحديث المؤشر بعد المعالجة الناجحة
+    last_event_id = ev_id
 
 async def replay_events():
     global last_event_id
@@ -173,39 +203,58 @@ async def replay_events():
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, timeout=10) as resp:
                     if resp.status == 400:
-                        last_event_id = ""
+                        print("⚠️ المؤشر منتهي الصلاحية، سيتم جلب السوق من جديد...")
+                        last_event_id = "" 
                         continue
                     if resp.status == 200:
                         data = await resp.json()
                         events = data.get('events', [])
+                        if not events: break
+                        
                         for ev in events:
-                            await consume_event(ev)
+                            await process_event(ev)
+                            
                         if len(events) < 500: break 
                     else:
                         break
         except Exception:
             break
-        await asyncio.sleep(0.5) # يمنع حظر الـ IP ويسمح للبوت بالعمل بحرية
 
 async def tonnel_websocket_loop():
-    # جلب الأحداث السابقة أولاً لتعبئة البيانات
-    await replay_events()
+    load_market_db()
     
     while True:
+        await replay_events() 
+        needs_db_save = True # إجبار تحديث الفلور بعد الريبلاي
+        
         try:
-            # ربط مستقر ومقاوم للانقطاع
             async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as websocket:
-                await replay_events() # جلب ما ضاع أثناء الانقطاع
-                
                 async for message in websocket:
                     try:
                         event = json.loads(message)
                         if event.get('type') == "marketplace.connected": continue
-                        await consume_event(event)
+                        await process_event(event)
                     except json.JSONDecodeError: pass
         except Exception as e: 
-            print(f"WebSocket reconnecting... {e}")
-            await asyncio.sleep(3)
+            await asyncio.sleep(2) # Backoff & retry
+
+# ==========================================
+# أمر المطور لتنظيف السوق العالق
+# ==========================================
+async def reset_market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMIN_IDS: return
+    global active_listings, last_event_id
+    
+    msg_id = await send_custom_msg(update.message.chat_id, "جاري تنظيف السوق وإعادة جلبه... ⏳")
+    active_listings.clear()
+    last_event_id = ""
+    save_market_db()
+    
+    await replay_events()
+    global needs_db_save
+    needs_db_save = True
+    
+    await edit_custom_msg(update.message.chat_id, msg_id, f"✅ تم تفريغ السوق وجلب البيانات الجديدة بنجاح.\nعدد الهدايا الآن: {len(active_listings)}")
 
 
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
@@ -256,8 +305,8 @@ async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if trigger_warning:
             warning_msg = 'دروح عمو روح خل واحد من المطورين يفك الحظر منك عود تعال <tg-emoji emoji-id="5872697861166075790">🚫</tg-emoji>'
             btn = [
-                [{"text": "الروسي", "url": "https://t.me/M6M9N", "style": "success", "icon_custom_emoji_id": "5375208161433124922"}],
-                [{"text": "ساسكي", "url": "https://t.me/O1916", "style": "danger", "icon_custom_emoji_id": "5373011380150501346"}]
+                [{"text": "الروسي", "url": "https://t.me/M6M9N", "style": "success", "icon_custom_emoji_id": "5372930329822659547"}],
+                [{"text": "ساسكي", "url": "https://t.me/O1916", "style": "danger", "icon_custom_emoji_id": "5258021357446268553"}]
             ]
             await send_custom_msg_banned(msg.chat_id, warning_msg, msg.message_id, extra_buttons=btn)
         
@@ -815,10 +864,10 @@ async def post_init(app: Application):
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
     asyncio.create_task(tonnel_websocket_loop()) 
-    asyncio.create_task(floor_updater_loop()) # تم إضافة لوب التحديث المعزول هنا
+    asyncio.create_task(floor_updater_loop())
 
 # ==========================================
-# نظام بحث الهدايا الدقيق والشامل
+# نظام بحث الهدايا الدقيق 
 # ==========================================
 async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
@@ -847,12 +896,13 @@ async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     found_gift_id = None
     found_gift_num = None
     
-    # البحث المباشر والموثوق في الذاكرة (التي أصبحت تحدث لحظياً دون توقف)
+    # البحث المباشر في قاعدة بياناتنا المكتملة
     for gift_id, data in active_listings.items():
         listing_name_clean = data['name'].lower().replace(' ', '')
         if clean_compare in listing_name_clean:
-            if found_price is None or data['price'] < found_price:
-                found_price = data['price']
+            price_val = float(data.get('price', 0))
+            if price_val > 0 and (found_price is None or price_val < found_price):
+                found_price = price_val
                 found_name = data['name']
                 found_gift_id = gift_id
                 found_gift_num = data.get('num', '')
@@ -1056,6 +1106,7 @@ def main():
     app.add_handler(ban_conv_handler)
     app.add_handler(unban_conv_handler)
     
+    app.add_handler(CommandHandler("reset_market", reset_market_cmd))
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
