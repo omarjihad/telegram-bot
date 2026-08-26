@@ -3,3 +3,4 @@ aiohttp
 websockets
 Flask
 httpx
+pyrogram
