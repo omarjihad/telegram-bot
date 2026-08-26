@@ -5,4 +5,4 @@ Flask
 httpx
 pyrogram
 TgCrypto
-
+curl_cffi
