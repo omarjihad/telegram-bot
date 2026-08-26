@@ -54,6 +54,7 @@ bot_users = set()
 whale_alert_users = {} 
 banned_users = set() 
 user_mapping = {} 
+mrkt_token = ""
 
 # حالات المحادثة
 ASK_CURRENCY, ASK_PRICE = range(2)
@@ -69,7 +70,6 @@ active_listings = {}
 last_event_id = ""
 seen_events = set()
 needs_db_save = False
-mrkt_token = "" 
 
 gift_floor_tonnel = {
     "price": "0", 
@@ -108,8 +108,8 @@ USDT_CASH = '<tg-emoji emoji-id="5213170203680060059">💵</tg-emoji>'
 HELLO_EMOJI = '<tg-emoji emoji-id="5800769433974611462">👋</tg-emoji>'
 NUM_EMOJIS = {1: '1️⃣', 2: '2️⃣', 3: '3️⃣', 4: '4️⃣', 5: '5️⃣', 6: '6️⃣'}
 
-CANCEL_BTN = {"text": "الغاء", "callback_data": "cancel", "style": "primary", "icon_custom_emoji_id": "5440681540541502133"}
-NEWS_BTN = {"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "primary", "icon_custom_emoji_id": "5224257782013769471"}
+CANCEL_BTN_DICT = {"text": "الغاء", "callback_data": "cancel", "style": "primary", "icon_custom_emoji_id": "5440681540541502133"}
+NEWS_BTN_DICT = {"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}
 
 def format_exact_price(price):
     if price == int(price): return str(int(price))
@@ -180,12 +180,11 @@ def load_market_db():
                 active_listings = data.get('listings', {})
                 last_event_id = data.get('last_event_id', "")
                 mrkt_token = data.get('mrkt_token', "")
-                print(f"✅ تم تحميل السوق: {len(active_listings)} هدية، الحدث الأخير: {last_event_id}")
+                print(f"✅ تم تحميل السوق: {len(active_listings)} هدية.")
         except:
             print("⚠️ خطأ في قراءة قاعدة بيانات السوق، سيتم البدء من جديد.")
             active_listings = {}
             last_event_id = ""
-            mrkt_token = ""
 
 def save_market_db():
     try:
@@ -199,7 +198,6 @@ async def floor_updater_loop():
         await asyncio.sleep(3) 
         if needs_db_save:
             needs_db_save = False
-            
             if active_listings:
                 try:
                     valid_listings = {k: v for k, v in active_listings.items() if float(v.get('price', 0)) > 0}
@@ -220,7 +218,6 @@ async def floor_updater_loop():
             else:
                 gift_floor_tonnel['price'] = "0"
                 gift_floor_tonnel['name'] = "لا توجد هدايا معروضة"
-                
             save_market_db()
 
 # ==========================================
@@ -278,7 +275,8 @@ async def replay_events():
                         data = await resp.json()
                         events = data.get('events', [])
                         if not events: break
-                        for ev in events: await process_event(ev)
+                        for ev in events:
+                            await process_event(ev)
                         if len(events) < 500: break 
                     else:
                         break
@@ -290,8 +288,7 @@ async def tonnel_websocket_loop():
     while True:
         await replay_events() 
         global needs_db_save
-        needs_db_save = True
-        
+        needs_db_save = True 
         try:
             async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as websocket:
                 async for message in websocket:
@@ -300,7 +297,7 @@ async def tonnel_websocket_loop():
                         if event.get('type') == "marketplace.connected": continue
                         await process_event(event)
                     except json.JSONDecodeError: pass
-        except Exception as e: 
+        except Exception: 
             await asyncio.sleep(2) 
 
 # ==========================================
@@ -363,6 +360,7 @@ async def mrkt_floor_updater_loop():
         await asyncio.sleep(15) 
         if not mrkt_token: continue
         
+        # استعلام للسوق بالكامل لجلب أرخص هدية
         json_data = {"collectionNames": [], "modelNames": [], "backdropNames": [], "symbolNames": [], "ordering": "Price", "lowToHigh": True, "count": 1, "cursor": "", "query": None, "promotedFirst": False}
         res = await fetch_mrkt_api(mrkt_token, json_data)
         
@@ -402,18 +400,82 @@ async def fetch_matching_mrkt_gifts(token, exact_name):
         
     return token, all_matches
 
+# --- دوال الإرسال الشاملة ---
+async def send_custom_msg_banned(chat_id, text, reply_to_message_id=None, extra_buttons=None, append_news=True):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    inline_keyboard = []
+    if extra_buttons: 
+        for btn_group in extra_buttons:
+            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
+            else: inline_keyboard.append([btn_group])
+    if append_news: inline_keyboard.append([NEWS_BTN_DICT])
+        
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
+    if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
+    async with aiohttp.ClientSession() as session:
+        try: await session.post(url, json=payload, timeout=10)
+        except: pass
+
+async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None, append_news=True):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    inline_keyboard = []
+    if extra_buttons: 
+        for btn_group in extra_buttons:
+            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
+            else: inline_keyboard.append([btn_group])
+    if append_news: inline_keyboard.append([NEWS_BTN_DICT])
+        
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
+    if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("result", {}).get("message_id")
+        except: pass
+    return None
+
+async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None, append_news=True):
+    url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+    inline_keyboard = []
+    if extra_buttons:
+        for btn_group in extra_buttons:
+            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
+            else: inline_keyboard.append([btn_group])
+    if append_news: inline_keyboard.append([NEWS_BTN_DICT])
+        
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
+    async with aiohttp.ClientSession() as session:
+        try: await session.post(url, json=payload, timeout=10)
+        except: pass
+
 # ==========================================
-# أوامر الترسيت (للمطورين)
+# نظام الإلغاء الشامل 
+# ==========================================
+async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        chat_id = update.callback_query.message.chat.id
+        msg_id = update.callback_query.message.message_id
+        await edit_custom_msg(chat_id, msg_id, f"تم الإلغاء بنجاح. {SUCCESS_EMOJI}", append_news=False)
+    else:
+        chat_id = update.message.chat_id
+        msg_id = update.message.message_id
+        await send_custom_msg(chat_id, f"تم الإلغاء بنجاح. {SUCCESS_EMOJI}", msg_id, append_news=False)
+    return ConversationHandler.END
+
+# ==========================================
+# أمر الترسيت للمطورين
 # ==========================================
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return
-    
     msg = "اختر ما تريد ترسيته لإصلاح التعليق:"
     btn = [
-        [{"text": "ترسيت مركت 🛒", "callback_data": "cmd_reset_mrkt", "style": "primary"}],
-        [{"text": "ترسيت تونيل 🎁", "callback_data": "cmd_reset_tonnel", "style": "success"}],
+        [{"text": f"ترسيت مركت {MRKT_EMOJI}", "callback_data": "cmd_reset_mrkt", "style": "primary"}],
+        [{"text": f"ترسيت تونيل {GIFT_FLOOR_EMOJI}", "callback_data": "cmd_reset_tonnel", "style": "success"}],
         [{"text": "ترسيت الاثنين 💥", "callback_data": "cmd_reset_both", "style": "danger"}],
-        [CANCEL_BTN] # بدون زر الأخبار
+        [CANCEL_BTN_DICT]
     ]
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn, append_news=False)
 
@@ -437,114 +499,112 @@ async def handle_reset_callbacks(update: Update, context: ContextTypes.DEFAULT_T
         
     await edit_custom_msg(query.message.chat_id, query.message.message_id, f"✅ تم الترسيت بنجاح!", append_news=False)
 
-# --- دوال الإرسال الشاملة ---
-async def send_custom_msg_banned(chat_id, text, reply_to_message_id=None, extra_buttons=None, append_news=True):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    inline_keyboard = []
-    if extra_buttons: 
-        for btn_group in extra_buttons:
-            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
-            else: inline_keyboard.append([btn_group])
-            
-    if append_news:
-        inline_keyboard.append([NEWS_BTN])
-        
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
-    if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
-    async with aiohttp.ClientSession() as session:
-        try: await session.post(url, json=payload, timeout=10)
-        except Exception: pass
-
-async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None, append_news=True):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    inline_keyboard = []
-    if extra_buttons: 
-        for btn_group in extra_buttons:
-            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
-            else: inline_keyboard.append([btn_group])
-            
-    if append_news:
-        inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
-        
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
-    if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("result", {}).get("message_id")
-        except Exception: pass
-    return None
-
-async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None, append_news=True):
-    url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
-    inline_keyboard = []
-    if extra_buttons:
-        for btn_group in extra_buttons:
-            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
-            else: inline_keyboard.append([btn_group])
-            
-    if append_news:
-        inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
-        
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
-    async with aiohttp.ClientSession() as session:
-        try: await session.post(url, json=payload, timeout=10)
-        except Exception: pass
-
 # ==========================================
-# نظام الإلغاء الشامل 
+# نظام البحث المتطور بالأزرار (مركت + تونيل)
 # ==========================================
-async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        await update.callback_query.answer()
-        chat_id = update.callback_query.message.chat.id
-        msg_id = update.callback_query.message.message_id
-        await edit_custom_msg(chat_id, msg_id, f"تم الإلغاء بنجاح. {SUCCESS_EMOJI}", append_news=False)
-    else:
-        chat_id = update.message.chat_id
-        msg_id = update.message.message_id
-        await send_custom_msg(chat_id, f"تم الإلغاء بنجاح. {SUCCESS_EMOJI}", msg_id, append_news=False)
+async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await is_user_banned(update, context): return ConversationHandler.END
+    msg = f"{SEARCH_EMOJI} <b>بحث عن هدية</b>\n\nأرسل اسم الهدية (مثال: pepe أو cap):"
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN_DICT], append_news=False)
+    return ASK_GIFT_SEARCH
+
+async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await is_user_banned(update, context): return ConversationHandler.END
+    search_query = update.message.text.strip()
+    
+    context.user_data['search_query'] = search_query
+    exact_name = resolve_gift_name(search_query)
+    
+    msg = f"أين تريد البحث عن <b>{exact_name}</b>؟"
+    # زر مركت (أخضر)، تونيل (أحمر)، الإلغاء والأخبار (بصف بعض)
+    btn = [
+        [{"text": f"بحث في مركت {MRKT_EMOJI}", "callback_data": "search_mrkt", "style": "success"}],
+        [{"text": f"بحث في تونيل {GIFT_FLOOR_EMOJI}", "callback_data": "search_tonnel", "style": "danger"}],
+        [NEWS_BTN_DICT, CANCEL_BTN_DICT] 
+    ]
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn, append_news=False)
     return ConversationHandler.END
 
+async def handle_search_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    action = query.data
+    chat_id = query.message.chat_id
+    msg_id = query.message.message_id
+    search_term = context.user_data.get('search_query', '')
+    
+    if not search_term:
+        await query.answer("انتهت الجلسة، ابحث من جديد.", show_alert=True)
+        return
+        
+    exact_name = resolve_gift_name(search_term)
+    await query.answer("جاري البحث... 🔍")
+    
+    if action == "search_tonnel":
+        await edit_custom_msg(chat_id, msg_id, f"جاري البحث في تونيل عن <b>{exact_name}</b>... ⏳", append_news=False)
+        found_price, found_gift_id, found_gift_num = None, None, ""
+        clean_compare = exact_name.lower().replace("'", "").replace("’", "").replace("-", " ")
+        
+        for gift_id, data in active_listings.items():
+            k = data['name'].lower().replace("'", "").replace("’", "").replace("-", " ")
+            if clean_compare == k:
+                price_val = float(data.get('price', 0))
+                if price_val > 0 and (found_price is None or price_val < found_price):
+                    found_price = price_val
+                    found_gift_id = gift_id
+                    found_gift_num = data.get('num', '')
+                    
+        if found_price:
+            clean_url_name = exact_name.lower().replace(' ', '')
+            url_telegram = f"https://t.me/nft/{clean_url_name}-{found_gift_num}" if found_gift_num else f"https://t.me/nft/{clean_url_name}"
+            
+            btn = [
+                [{"text": f"عرض في Tonnel {GIFT_FLOOR_EMOJI}", "url": f"https://t.me/tonnel_network_bot/gift?startapp={found_gift_id}", "style": "success"}],
+                [{"text": "عرض في تيليجرام ✈️", "url": url_telegram, "style": "danger"}]
+            ]
+            msg = f"{GIFT_FLOOR_EMOJI} نتيجة البحث في تونيل:\nالهدية: <b>{exact_name}</b>\nأقل سعر: <b>{format_exact_price(found_price)}</b> {GRAM_EMOJI}"
+            await edit_custom_msg(chat_id, msg_id, msg, extra_buttons=btn, append_news=False)
+        else:
+            await edit_custom_msg(chat_id, msg_id, f"عذراً، <b>{exact_name}</b> غير معروضة في تونيل حالياً. {FAIL_EMOJI}", append_news=False)
+
+    elif action == "search_mrkt":
+        global mrkt_token
+        await edit_custom_msg(chat_id, msg_id, f"جاري البحث في مركت عن <b>{exact_name}</b>... ⏳", append_news=False)
+        
+        if not mrkt_token: await auth_mrkt_bg()
+            
+        token, matches = await fetch_matching_mrkt_gifts(mrkt_token, exact_name)
+        if matches == "AUTH_ERROR":
+            await auth_mrkt_bg()
+            token, matches = await fetch_matching_mrkt_gifts(mrkt_token, exact_name)
+            
+        found_price, found_gift_id, found_gift_num = None, None, ""
+        if matches and isinstance(matches, list):
+            valid = [(get_mrkt_price(g), g) for g in matches if get_mrkt_price(g) is not None]
+            if valid:
+                valid.sort(key=lambda x: x[0])
+                found_price = valid[0][0] / 1e9
+                found_gift_id = valid[0][1].get("id")
+                found_gift_num = valid[0][1].get("number", "")
+                        
+        if found_price:
+            clean_url_name = exact_name.lower().replace(' ', '')
+            url_telegram = f"https://t.me/nft/{clean_url_name}-{found_gift_num}" if found_gift_num else f"https://t.me/nft/{clean_url_name}"
+
+            btn = [
+                [{"text": f"عرض في MRKT {MRKT_EMOJI}", "url": f"https://t.me/mrkt/app?startapp={found_gift_id}", "style": "primary"}],
+                [{"text": "عرض في تيليجرام ✈️", "url": url_telegram, "style": "danger"}]
+            ]
+            msg = f"{MRKT_EMOJI} نتيجة البحث في مركت:\nالهدية: <b>{exact_name}</b>\nأقل سعر: <b>{format_exact_price(found_price)}</b> {GRAM_EMOJI}"
+            await edit_custom_msg(chat_id, msg_id, msg, extra_buttons=btn, append_news=False)
+        else:
+            await edit_custom_msg(chat_id, msg_id, f"عذراً، <b>{exact_name}</b> غير معروضة في مركت حالياً. {FAIL_EMOJI}", append_news=False)
+
 # ==========================================
-# نظام الحظر 
+# نظام الحظر وإدارة المستخدمين
 # ==========================================
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in bot_users: bot_users.add(user.id)
     if user.username: user_mapping[user.username.lower()] = user.id
-
-async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if not update.effective_user: return False
-    user_id = update.effective_user.id
-    
-    if user_id in banned_users:
-        msg = update.message
-        if not msg or not msg.text: return True
-        
-        chat_type = msg.chat.type
-        text = msg.text.lower()
-        trigger_warning = False
-        
-        if chat_type == 'private': trigger_warning = True
-        elif text.startswith('/'): trigger_warning = True
-        elif msg.reply_to_message and context.bot.id == msg.reply_to_message.from_user.id: trigger_warning = True
-        elif context.bot.username and context.bot.username.lower() in text: trigger_warning = True
-        else:
-            bot_keywords = ["الاوامر", "اوامر", "فلور الهدايا", "فلور", "هدايا", "رصيدي", "تغيير محفظتي", "تفعيل التنبيهات", "بحث", "صرف", "سعر", "نبهني"]
-            if any(kw in text for kw in bot_keywords): trigger_warning = True
-
-        if trigger_warning:
-            warning_msg = 'دروح عمو روح خل واحد من المطورين يفك الحظر منك عود تعال <tg-emoji emoji-id="5872697861166075790">🚫</tg-emoji>'
-            btn = [
-                [{"text": "الروسي", "url": "https://t.me/M6M9N", "style": "success", "icon_custom_emoji_id": "5372930329822659547"}],
-                [{"text": "ساسكي", "url": "https://t.me/O1916", "style": "danger", "icon_custom_emoji_id": "5258021357446268553"}]
-            ]
-            await send_custom_msg_banned(msg.chat_id, warning_msg, msg.message_id, extra_buttons=btn)
-        
-        return True 
-    return False
 
 async def process_ban(chat_id, msg_id, target_input, context):
     target_id, target_name = None, target_input
@@ -573,13 +633,11 @@ async def ban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             banned_users.add(target_id)
             await send_custom_msg(update.message.chat_id, f"✅ تم حظر {target_name} بنجاح.", update.message.message_id)
         return ConversationHandler.END
-    
     parts = update.message.text.split()
     if len(parts) > 1:
         await process_ban(update.message.chat_id, update.message.message_id, parts[1], context)
         return ConversationHandler.END
-
-    await send_custom_msg(update.message.chat_id, "ارسل ايدي او يوزر الشخص لحظره:", update.message.message_id, extra_buttons=[CANCEL_BTN], append_news=False)
+    await send_custom_msg(update.message.chat_id, "ارسل ايدي او يوزر الشخص لحظره:", update.message.message_id, extra_buttons=[CANCEL_BTN_DICT], append_news=False)
     return ASK_BAN
 
 async def ban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -609,42 +667,20 @@ async def unban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await send_custom_msg(update.message.chat_id, f"المستخدم غير محظور. {WARN_EMOJI}", update.message.message_id)
         return ConversationHandler.END
-    
     parts = update.message.text.split()
     if len(parts) > 1:
         await process_unban(update.message.chat_id, update.message.message_id, parts[1], context)
         return ConversationHandler.END
-
-    await send_custom_msg(update.message.chat_id, "ارسل ايدي او يوزر الشخص لفك الحظر عنه:", update.message.message_id, extra_buttons=[CANCEL_BTN], append_news=False)
+    await send_custom_msg(update.message.chat_id, "ارسل ايدي او يوزر الشخص لفك الحظر عنه:", update.message.message_id, extra_buttons=[CANCEL_BTN_DICT], append_news=False)
     return ASK_UNBAN
 
 async def unban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_unban(update.message.chat_id, update.message.message_id, update.message.text.strip(), context)
     return ConversationHandler.END
 
-# --- API فحص المحفظة ---
-async def check_ton_wallet(address):
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://tonapi.io/v2/accounts/{address}"
-            async with session.get(url, timeout=5) as resp:
-                if resp.status != 200: return False, 0, 0
-                data = await resp.json()
-                ton_balance = data.get('balance', 0) / 1e9 
-
-            usdt_url = f"https://tonapi.io/v2/accounts/{address}/jettons"
-            usdt_balance = 0
-            async with session.get(usdt_url, timeout=5) as resp:
-                if resp.status == 200:
-                    j_data = await resp.json()
-                    for b in j_data.get('balances', []):
-                        if b['jetton']['symbol'] in ['USD₮', 'USDT']:
-                            decimals = b['jetton']['decimals']
-                            usdt_balance = float(b['balance']) / (10**decimals)
-                            break
-            return True, ton_balance, usdt_balance
-    except Exception: return False, 0, 0
-
+# ==========================================
+# نظام الأوامر الأساسية والمحفظة
+# ==========================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_new_user(update.effective_user, context)
     if await is_user_banned(update, context): return ConversationHandler.END
@@ -664,7 +700,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         else:
             msg = f"اهلا بك {safe_name} {CROWN_EMOJI}\n\nقم بارسال عنوان محفضتك \nاو الادرس الخاص بك لربط محفضتك {PLANE_EMOJI}"
-            await send_custom_msg(chat_id, msg, extra_buttons=[CANCEL_BTN], append_news=False)
+            await send_custom_msg(chat_id, msg, extra_buttons=[CANCEL_BTN_DICT], append_news=False)
             return ASK_WALLET
     else:
         msg = (f"أهلاً بك في البوت يا {safe_name}! {HELLO_EMOJI}\n\n"
@@ -694,124 +730,49 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
         await edit_custom_msg(chat_id, msg_id, f"عنوان المحفضه خطا ! {FAIL_EMOJI}")
     return ConversationHandler.END
 
-# --- أنظمة الصرافة والأسعار ---
-def normalize_currency(curr_str):
-    curr = curr_str.lower().strip()
-    if curr in ['دولار', 'usdt', 'usd']: return 'USD'
-    elif curr in ['ماستر', 'master']: return 'IQD'
-    elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: return 'STARS'
-    elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: return 'TON' 
-    elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: return 'BTC'
-    elif curr in ['اسيا', 'آسيا', 'asia']: return 'ASIA'
-    elif curr in ['باث', 'bath']: return 'BATH'
-    return None
-
-def get_current_price(curr_code):
-    if curr_code == 'USD': return 1.0
-    elif curr_code == 'IQD': return last_known_iqd
-    elif curr_code == 'STARS': return 0.015
-    elif curr_code in crypto_prices: return crypto_prices[curr_code]
-    return 0
-
-def get_daily_trend_emoji(currency, current_price=None):
-    if currency in ['BTC', 'TON', 'BATH']:
-        change = crypto_24h_trend.get(currency, 0.0)
-        if change > 0: return UP_EMOJI
-        elif change < 0: return DOWN_EMOJI
-        return ""
-    elif currency == 'IQD':
-        open_price = daily_iqd['open_price']
-        if open_price == 0 or current_price == open_price: return ""
-        if current_price > open_price: return UP_EMOJI
-        elif current_price < open_price: return DOWN_EMOJI
-        return ""
-    return ""
-
-async def fetch_mastercard_price(session):
-    try:
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-        headers = {"Content-Type": "application/json"}
-        payload = {"fiat": "IQD", "page": 1, "rows": 1, "tradeType": "SELL", "asset": "USDT", "countries": [], "payTypes": [], "publisherType": None, "merchantCheck": False}
-        async with session.post(url, json=payload, headers=headers, timeout=5) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get('data') and len(data['data']) > 0:
-                    price_str = data['data'][0]['adv']['price']
-                    price_float = float(price_str)
-                    if price_float < 2000: price_float = price_float * 100
-                    return int(price_float)
-    except Exception: pass
-    return None
-
+# ==========================================
+# نظام الأسعار المباشرة والتصريف
+# ==========================================
 async def update_prices_if_needed():
-    global last_fetch_time, cached_msg, last_known_iqd, crypto_prices, crypto_24h_trend, daily_iqd
+    global last_fetch_time, cached_msg, last_known_iqd, crypto_prices
     current_time = time.time()
-    
     if current_time - last_fetch_time < CACHE_TIME and cached_msg: return True
         
     try:
         async with aiohttp.ClientSession() as session:
             crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","GRAMUSDT"]'
-            crypto_task = session.get(crypto_url, timeout=6)
-            master_task = fetch_mastercard_price(session)
-            
-            response, fetched_iqd = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
-            
-            if not isinstance(response, Exception) and response.status == 200:
-                crypto_data = await response.json()
-                for item in crypto_data:
-                    symbol = item['symbol']
-                    if symbol == 'BTCUSDT':
-                        crypto_prices['BTC'] = float(item['lastPrice'])
-                        crypto_24h_trend['BTC'] = float(item['priceChangePercent'])
-                    elif symbol == 'GRAMUSDT':
-                        crypto_prices['TON'] = float(item['lastPrice'])
-                        crypto_24h_trend['TON'] = float(item['priceChangePercent'])
-
+            async with session.get(crypto_url, timeout=6) as resp:
+                if resp.status == 200:
+                    for item in await resp.json():
+                        if item['symbol'] == 'BTCUSDT': crypto_prices['BTC'] = float(item['lastPrice'])
+                        elif item['symbol'] == 'GRAMUSDT': crypto_prices['TON'] = float(item['lastPrice'])
+                        
             try:
-                bath_url = 'https://api.binance.com/api/v3/ticker/24hr?symbol=BATHUSDT'
-                async with session.get(bath_url, timeout=3) as bath_resp:
-                    if bath_resp.status == 200:
-                        bath_data = await bath_resp.json()
-                        crypto_prices['BATH'] = float(bath_data['lastPrice'])
-                        crypto_24h_trend['BATH'] = float(bath_data['priceChangePercent'])
-                    else: crypto_prices['BATH'] = 0.03
-            except: crypto_prices['BATH'] = 0.03
-
-            if isinstance(fetched_iqd, int) and fetched_iqd > 0: last_known_iqd = fetched_iqd
-                
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            if daily_iqd['date'] != today_str:
-                daily_iqd['date'] = today_str
-                daily_iqd['open_price'] = last_known_iqd
-
-            btc_int = int(crypto_prices.get('BTC', 0))
-            ton_val = crypto_prices.get('TON', 0)
-            bath_val = crypto_prices.get('BATH', 0.03)
-            
-            btc_trend = get_daily_trend_emoji('BTC')
-            ton_trend = get_daily_trend_emoji('TON')
-            bath_trend = get_daily_trend_emoji('BATH')
-            iqd_trend = get_daily_trend_emoji('IQD', last_known_iqd)
-            asia_price_for_100_usd = int(last_known_iqd / 0.9)
+                url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+                payload = {"fiat": "IQD", "page": 1, "rows": 1, "tradeType": "SELL", "asset": "USDT", "countries": [], "payTypes": [], "publisherType": None, "merchantCheck": False}
+                async with session.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=5) as r:
+                    if r.status == 200:
+                        d = await r.json()
+                        if d.get('data'):
+                            p = float(d['data'][0]['adv']['price'])
+                            last_known_iqd = int(p * 100) if p < 2000 else int(p)
+            except: pass
 
             msg = (f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
                    f'{GIFT_FLOOR_EMOJI} فلور الهدايا (تونيل): <b>{gift_floor_tonnel["price"]}</b> {GRAM_EMOJI}\n'
                    f'{MRKT_EMOJI} فلور الهدايا (مركت): <b>{gift_floor_mrkt["price"]}</b> {GRAM_EMOJI}\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-                   f'{MASTER_EMOJI} الدولار (100$): <b>{last_known_iqd:,}</b> IQD {iqd_trend}\n'
-                   f'{ASIA_EMOJI} اسيا (100$): <b>{asia_price_for_100_usd:,}</b> دينار\n'
+                   f'{MASTER_EMOJI} الدولار (100$): <b>{last_known_iqd:,}</b> IQD\n'
+                   f'{ASIA_EMOJI} اسيا (100$): <b>{int(last_known_iqd / 0.9):,}</b> دينار\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-                   f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc_int:,}</b> {btc_trend}\n'
-                   f'{GRAM_EMOJI} GRAM: <b>${ton_val:,.2f}</b> {ton_trend}\n'
-                   f'{BATH_EMOJI} BATH: <b>${bath_val:,.4f}</b> {bath_trend}\n'
+                   f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${int(crypto_prices.get("BTC", 0)):,}</b>\n'
+                   f'{GRAM_EMOJI} GRAM: <b>${crypto_prices.get("TON", 0):,.2f}</b>\n'
                    "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-                   f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية والمحلية</i>\n'
                    f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>')
             cached_msg = msg
             last_fetch_time = current_time
             return True
-    except Exception: return False
+    except: return False
 
 def generate_conversion_msg(amount, currency_str):
     curr = currency_str.lower()
@@ -856,11 +817,13 @@ def generate_conversion_msg(amount, currency_str):
     msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
     return msg
 
-# --- نظام التنبيهات (الأسعار) ---
+# ==========================================
+# التنبيهات (الأسعار والحيتان)
+# ==========================================
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     msg = f"{WHALE_BELL} <b>نظام التنبيهات الذكي</b>\n\nاكتب اسم العملة اللي تريد أراقبها (مثال: جرام، بتكوين، باث، ماستر...):"
-    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN], append_news=False)
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN_DICT], append_news=False)
     return ASK_CURRENCY
 
 async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -874,11 +837,11 @@ async def alert_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     curr_code = normalize_currency(curr_input)
     if not curr_code:
-        await send_custom_msg(update.message.chat_id, f"عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح: {WARN_EMOJI}", update.message.message_id, extra_buttons=[CANCEL_BTN], append_news=False)
+        await send_custom_msg(update.message.chat_id, f"عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح: {WARN_EMOJI}", update.message.message_id, extra_buttons=[CANCEL_BTN_DICT], append_news=False)
         return ASK_CURRENCY
     
     context.user_data['alert_curr'] = curr_code; context.user_data['alert_curr_name'] = curr_input
-    await send_custom_msg(update.message.chat_id, f"{SUCCESS_EMOJI} تم اختيار: <b>{curr_input}</b>\n\nالآن ادخل السعر الذي تريد التنبيه عنده (أرقام فقط):", update.message.message_id, extra_buttons=[CANCEL_BTN], append_news=False)
+    await send_custom_msg(update.message.chat_id, f"{SUCCESS_EMOJI} تم اختيار: <b>{curr_input}</b>\n\nالآن ادخل السعر الذي تريد التنبيه عنده (أرقام فقط):", update.message.message_id, extra_buttons=[CANCEL_BTN_DICT], append_news=False)
     return ASK_PRICE
 
 async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -886,7 +849,7 @@ async def alert_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price_input = update.message.text.strip()
     match = re.search(r'(\d+(?:\.\d+)?)', price_input)
     if not match:
-        await send_custom_msg(update.message.chat_id, f"يرجى إدخال رقم صحيح: {WARN_EMOJI}", update.message.message_id, extra_buttons=[CANCEL_BTN], append_news=False)
+        await send_custom_msg(update.message.chat_id, f"يرجى إدخال رقم صحيح: {WARN_EMOJI}", update.message.message_id, extra_buttons=[CANCEL_BTN_DICT], append_news=False)
         return ASK_PRICE
         
     target_price = float(match.group(1))
@@ -936,7 +899,6 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code> ({dir_txt})\n"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
 
-# --- نظام تنبيهات الحيتان ---
 async def toggle_whale_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return
     user_id = update.message.from_user.id
@@ -959,7 +921,6 @@ async def check_whales_loop(app: Application):
     while True:
         await asyncio.sleep(20) 
         if not whale_alert_users: continue
-        
         try:
             wallet = "EQBX63RAdgShnrJGptNINn2uUFIqEQ9_hD0z4E7h-gH-Zk5t" 
             url = f"https://tonapi.io/v2/accounts/{wallet}/events?limit=10"
@@ -1028,121 +989,36 @@ async def check_alerts_loop(app: Application):
                     await send_custom_msg(chat_id, msg)
         alerts_db = [a for a in alerts_db if a['active']]
 
+
 # ==========================================
-# نظام البحث المتطور بالأزرار
+# قراءة الرسائل ومعالجة الأوامر 
 # ==========================================
-async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await is_user_banned(update, context): return ConversationHandler.END
-    msg = f"{SEARCH_EMOJI} <b>بحث عن هدية</b>\n\nأرسل اسم الهدية (مثال: pepe أو cap):"
-    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN], append_news=False)
-    return ASK_GIFT_SEARCH
-
-async def perform_gift_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await is_user_banned(update, context): return ConversationHandler.END
-    search_query = update.message.text.strip()
-    
-    context.user_data['search_query'] = search_query
-    exact_name = resolve_gift_name(search_query)
-    
-    msg = f"أين تريد البحث عن <b>{exact_name}</b>؟"
-    btn = [
-        [{"text": "بحث في مركت 🛒", "callback_data": "search_mrkt", "style": "success"}],
-        [{"text": "بحث في تونيل 🎁", "callback_data": "search_tonnel", "style": "danger"}],
-        [NEWS_BTN, CANCEL_BTN] 
-    ]
-    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn, append_news=False)
-    return ConversationHandler.END
-
-async def handle_search_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    action = query.data
-    chat_id = query.message.chat_id
-    msg_id = query.message.message_id
-    search_term = context.user_data.get('search_query', '')
-    
-    if not search_term:
-        await query.answer("انتهت الجلسة، ابحث من جديد.", show_alert=True)
-        return
-        
-    exact_name = resolve_gift_name(search_term)
-    await query.answer("جاري البحث... 🔍")
-    
-    if action == "search_tonnel":
-        await edit_custom_msg(chat_id, msg_id, f"جاري البحث في تونيل عن <b>{exact_name}</b>... ⏳", append_news=False)
-        found_price, found_gift_id, found_gift_num = None, None, ""
-        clean_compare = exact_name.lower().replace("'", "").replace("’", "").replace("-", " ")
-        
-        for gift_id, data in active_listings.items():
-            k = data['name'].lower().replace("'", "").replace("’", "").replace("-", " ")
-            if clean_compare == k:
-                price_val = float(data.get('price', 0))
-                if price_val > 0 and (found_price is None or price_val < found_price):
-                    found_price = price_val
-                    found_gift_id = gift_id
-                    found_gift_num = data.get('num', '')
-                    
-        if found_price:
-            clean_url_name = exact_name.lower().replace(' ', '')
-            url_telegram = f"https://t.me/nft/{clean_url_name}-{found_gift_num}" if found_gift_num else f"https://t.me/nft/{clean_url_name}"
-            
-            btn = [
-                [{"text": "عرض في Tonnel", "url": f"https://t.me/tonnel_network_bot/gift?startapp={found_gift_id}", "style": "success", "icon_custom_emoji_id": "5210956306952758910"}],
-                [{"text": "عرض في تيليجرام", "url": url_telegram, "style": "danger", "icon_custom_emoji_id": "5411597774359653692"}]
-            ]
-            msg = f"{GIFT_FLOOR_EMOJI} نتيجة البحث في تونيل:\nالهدية: <b>{exact_name}</b>\nأقل سعر: <b>{format_exact_price(found_price)}</b> {GRAM_EMOJI}"
-            await edit_custom_msg(chat_id, msg_id, msg, extra_buttons=btn, append_news=False)
-        else:
-            await edit_custom_msg(chat_id, msg_id, f"عذراً، <b>{exact_name}</b> غير معروضة في تونيل حالياً. {FAIL_EMOJI}", append_news=False)
-
-    elif action == "search_mrkt":
-        global mrkt_token
-        await edit_custom_msg(chat_id, msg_id, f"جاري البحث في مركت عن <b>{exact_name}</b>... ⏳", append_news=False)
-        
-        if not mrkt_token: await auth_mrkt_bg()
-            
-        token, matches = await fetch_matching_mrkt_gifts(mrkt_token, exact_name)
-        if matches == "AUTH_ERROR":
-            await auth_mrkt_bg()
-            token, matches = await fetch_matching_mrkt_gifts(mrkt_token, exact_name)
-            
-        found_price, found_gift_id, found_gift_num = None, None, ""
-        if matches and isinstance(matches, list):
-            valid = [(get_mrkt_price(g), g) for g in matches if get_mrkt_price(g) is not None]
-            if valid:
-                valid.sort(key=lambda x: x[0])
-                found_price = valid[0][0] / 1e9
-                found_gift_id = valid[0][1].get("id")
-                found_gift_num = valid[0][1].get("number", "")
-                        
-        if found_price:
-            clean_url_name = exact_name.lower().replace(' ', '')
-            url_telegram = f"https://t.me/nft/{clean_url_name}-{found_gift_num}" if found_gift_num else f"https://t.me/nft/{clean_url_name}"
-
-            btn = [
-                [{"text": "عرض في MRKT", "url": f"https://t.me/mrkt/app?startapp={found_gift_id}", "style": "primary", "icon_custom_emoji_id": "5210956306952758910"}],
-                [{"text": "عرض في تيليجرام", "url": url_telegram, "style": "danger", "icon_custom_emoji_id": "5411597774359653692"}]
-            ]
-            msg = f"{MRKT_EMOJI} نتيجة البحث في مركت:\nالهدية: <b>{exact_name}</b>\nأقل سعر: <b>{format_exact_price(found_price)}</b> {GRAM_EMOJI}"
-            await edit_custom_msg(chat_id, msg_id, msg, extra_buttons=btn, append_news=False)
-        else:
-            await edit_custom_msg(chat_id, msg_id, f"عذراً، <b>{exact_name}</b> غير معروضة في مركت حالياً. {FAIL_EMOJI}", append_news=False)
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    text = update.message.text.strip().lower()
-    chat_id, msg_id = update.message.chat_id, update.message.message_id
+    original_text = update.message.text.strip()
+    text = original_text.lower()
+    chat_id, user_id, msg_id = update.message.chat_id, update.message.from_user.id, update.message.message_id
     
+    await track_new_user(update.effective_user, context)
     if await is_user_banned(update, context): return
+
+    forbidden = ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]
+    if any(word in text.split() for word in forbidden): return
+
+    if re.search(r'(^|\s)(تون|ton)(\s|$)', text):
+        msg = f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}"
+        await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
+        return
 
     if text in ["الاوامر", "اوامر"]:
         msg = f"اهلا بك في قائمه اوامر البوت {CLIPBOARD_EMOJI}\n\n"
-        msg += f'{NUM_EMOJIS[1]} <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات مباشرة (دولار، ماستر، جرام، بتكوين، اسيا، نجوم، باث) {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[2]} <b>نبهني</b>: لمراقبة سعر عملة معينة وتنبيهك عند وصولها للهدف {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[3]} <b>تنبيهاتي</b>: لعرض وإدارة تنبيهات الأسعار الخاصة بك {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[4]} <b>تفعيل التنبيهات</b>: لتفعيل/إلغاء وضع مراقبة حيتان GRAM وإرسال إشعار للتحويلات الضخمة {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[5]} <b>رصيدي</b>: لمعرفة رصيدك في المحفظة المربوطة {END_EMOJIS}\n\n'
-        msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير محفظة GRAM الخاصة بك {END_EMOJIS}\n'
-        msg += f'<tg-emoji emoji-id="5411597774359653692">🔍</tg-emoji> <b>بحث هدية</b>: للبحث عن ارخص سعر لهدية معينة {END_EMOJIS}\n'
+        msg += f'{NUM_EMOJIS[1]} <b>صرف [رقم] [عملة]</b>: لحساب قيمة العملات {END_EMOJIS}\n'
+        msg += f'{NUM_EMOJIS[2]} <b>نبهني</b>: لمراقبة سعر عملة {END_EMOJIS}\n'
+        msg += f'{NUM_EMOJIS[3]} <b>تنبيهاتي</b>: لعرض وإدارة تنبيهات الأسعار {END_EMOJIS}\n'
+        msg += f'{NUM_EMOJIS[4]} <b>تفعيل التنبيهات</b>: لتشغيل مراقبة حيتان GRAM {END_EMOJIS}\n'
+        msg += f'{NUM_EMOJIS[5]} <b>رصيدي</b>: لمعرفة رصيدك في المحفظة المربوطة {END_EMOJIS}\n'
+        msg += f'{NUM_EMOJIS[6]} <b>تغيير محفظتي</b>: لربط أو تغيير المحفظة {END_EMOJIS}\n'
+        msg += f'<tg-emoji emoji-id="5411597774359653692">🔍</tg-emoji> <b>بحث هدية</b> أو <b>بحث</b>: للبحث في الأسواق {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
 
@@ -1157,7 +1033,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text in ["رصيدي", "/رصيدي", "رص", "/رص"]:
-        user_id = update.message.from_user.id
         if user_id not in user_wallets:
             msg = f"لم تقم بربط محفضتك بالبوت {WARN_EMOJI}"
             btn = [[{"text": "ربط محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
@@ -1175,7 +1050,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_user = update.message.reply_to_message.from_user
             target_id = target_user.id
             target_name = html.escape(target_user.first_name)
-            
             if target_id not in user_wallets:
                 msg = f"المستخدم <b>{target_name}</b> لم يقم بربط محفظته بالبوت {WARN_EMOJI}"
                 await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
@@ -1201,12 +1075,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
         return
 
-    exact_price_keywords = ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "جرام", "غرام", "كرام", "قرام", "btc", "gram", "ماستر", "نجوم", "نجمة", "نج", "اسيا", "باث", "bath", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]
+    exact_price_keywords = ["صرف", "سعر", "اسعار", "دولار", "بتكوين", "جرام", "btc", "gram", "ماستر", "صرف دولار"]
     if text in exact_price_keywords:
         await update_prices_if_needed()
         reply = cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}"
         await send_custom_msg(chat_id, reply, reply_to_message_id=msg_id)
 
+async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = update.my_chat_member
+    if result.new_chat_member.status in ["member", "administrator"] and result.old_chat_member.status not in ["member", "administrator"]:
+        chat = result.chat
+        msg = f"تم تشغيل البوت اكتب الاوامر او اوامر لعرض الشرح {HELLO_EMOJI}"
+        try:
+            await send_custom_msg(chat.id, msg)
+        except: pass
+        
+        admin_msg = f"{WHALE_BELL} <b>تم إضافة البوت إلى مجموعة جديدة!</b>\nالاسم: {html.escape(chat.title)}\nالآيدي: <code>{chat.id}</code>"
+        if chat.username: admin_msg += f"\nالرابط: https://t.me/{chat.username}"
+        else: admin_msg += f"\nالرابط: <i>مجموعة خاصة (لا يوجد رابط عام)</i>"
+            
+        try:
+            for admin_id in ADMIN_IDS:
+                await context.bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode="HTML")
+        except: pass
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print(f"⚠️ ظهر خطأ بالبوت: {context.error}")
+
+
+# ==========================================
+# تشغيل المهام بالخلفية
+# ==========================================
 async def post_init(app: Application):
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
@@ -1277,6 +1176,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
     
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    app.add_error_handler(error_handler)
     
     print("--- البوت شغال الآن ومستعد للعمل ---")
     app.run_polling(drop_pending_updates=True)
