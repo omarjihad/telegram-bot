@@ -17,18 +17,17 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes, ChatMemberHandler
 from telegram.request import HTTPXRequest
 
-# مكاتب Telethon لـ MRKT
-from telethon import TelegramClient
-from telethon.sessions import StringSession
-from telethon.tl.functions.messages import RequestAppWebViewRequest
-from telethon.tl.types import InputBotAppShortName
+# مكاتب Pyrogram لـ MRKT
+from pyrogram import Client as PyroClient
+from pyrogram.raw.functions.messages import RequestAppWebView
+from pyrogram.raw.types import InputBotAppShortName, InputUser
 from curl_cffi.requests import AsyncSession
 
 # إخفاء اللوجات المزعجة وتحذيرات PTB
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.ERROR) 
 logging.getLogger("websockets").setLevel(logging.WARNING)
-logging.getLogger("telethon").setLevel(logging.ERROR)
+logging.getLogger("pyrogram").setLevel(logging.ERROR)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
@@ -37,19 +36,27 @@ ADMIN_IDS = [7126816492, 1955081272]
 DB_FILE = "tonnel_db.json"
 
 # ==========================================
-# إعدادات جلسة Telethon لـ MRKT
+# إعدادات جلسة Pyrogram لـ MRKT
 # ==========================================
-TELE_API_ID = int(os.environ.get("TELE_API_ID", 12345678)) 
-TELE_API_HASH = os.environ.get("TELE_API_HASH", "PUT_YOUR_API_HASH_HERE")
+PYRO_API_ID = int(os.environ.get("PYRO_API_ID", 12345678)) 
+PYRO_API_HASH = os.environ.get("PYRO_API_HASH", "PUT_YOUR_API_HASH_HERE")
 
-# سحب الجلسة من السيكرت (يدعم Session File و String Session)
+# سحب الجلسة من السيكرت (يدعم Session File و String Session بذكاء)
 RAW_SESSION = os.environ.get("SESSION_NAME", "mrkt_session")
 if len(RAW_SESSION) > 50:
-    SESSION_DATA = StringSession(RAW_SESSION)
+    pyro_client = PyroClient(
+        name="mrkt_memory",
+        api_id=PYRO_API_ID,
+        api_hash=PYRO_API_HASH,
+        session_string=RAW_SESSION,
+        in_memory=True
+    )
 else:
-    SESSION_DATA = RAW_SESSION
-
-tele_client = None
+    pyro_client = PyroClient(
+        name=RAW_SESSION,
+        api_id=PYRO_API_ID,
+        api_hash=PYRO_API_HASH
+    )
 
 # نظام الكاش والبيانات
 CACHE_TIME = 2
@@ -168,35 +175,33 @@ def format_exact_price(price):
     return f"{price:.6f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# MRKT API Functions (بالاعتماد على Telethon)
+# MRKT API Functions (بالاعتماد على Pyrogram)
 # ==========================================
 async def get_mrkt_auth_token():
-    global tele_client
+    global pyro_client
     try:
-        if tele_client is None:
-            tele_client = TelegramClient(SESSION_DATA, TELE_API_ID, TELE_API_HASH)
+        if not pyro_client.is_connected:
+            print("🔄 [MRKT] جاري الاتصال بحساب تيليجرام (Pyrogram)...")
+            await pyro_client.connect()
             
-        if not tele_client.is_connected():
-            print("🔄 [MRKT] جاري الاتصال بحساب تيليجرام...")
-            await tele_client.connect()
-            
-        # فحص تسجيل الدخول (لمنع تعليق البوت إذا كانت الجلسة خطأ)
-        if not await tele_client.is_user_authorized():
-            print("⚠️ [MRKT] خطأ: الجلسة غير مسجلة دخول! تأكد من ملف الجلسة أو السيكرت.")
+        try:
+            # نجلب بيانات البوت حتى نتأكد إن الجلسة صحيحة وشغالة بدون ما يعلق
+            await pyro_client.get_users('mrkt')
+            peer = await pyro_client.resolve_peer('mrkt')
+        except Exception as e:
+            print(f"⚠️ [MRKT] خطأ: الجلسة غير مسجلة دخول! تأكد من ملف الجلسة أو السيكرت. التفاصيل: {e}")
             return None
 
         print("✅ [MRKT] الحساب متصل. جاري جلب بيانات WebView...")
-        bot_entity = await tele_client.get_entity('mrkt')
-        input_bot = await tele_client.get_input_entity(bot_entity)
-        bot_app = InputBotAppShortName(bot_id=input_bot, short_name="app")
+        bot = InputUser(user_id=peer.user_id, access_hash=peer.access_hash)
+        bot_app = InputBotAppShortName(bot_id=bot, short_name="app")
 
-        web_view = await tele_client(
-            RequestAppWebViewRequest(
-                peer=input_bot,
+        web_view = await pyro_client.invoke(
+            RequestAppWebView(
+                peer=peer,
                 app=bot_app,
                 platform="android",
-                write_allowed=True,
-                start_param=""
+                write_allowed=True
             )
         )
 
@@ -204,7 +209,7 @@ async def get_mrkt_auth_token():
         init_data = url.split("tgWebAppData=", 1)[1].split("&tgWebAppVersion", 1)[0]
         init_data = unquote(init_data)
 
-        print("🔄 [MRKT] تم استخراج init_data. جاري جلب التوكن من السيرفر...")
+        print("🔄 [MRKT] تم استخراج بيانات المصادقة. جاري جلب التوكن من السيرفر...")
         async with AsyncSession(impersonate="chrome") as s:
             r = await s.post(
                 "https://api.tgmrkt.io/api/v1/auth", 
@@ -239,7 +244,7 @@ async def mrkt_updater_loop():
                 async with AsyncSession(impersonate="chrome") as s:
                     r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
                     if r.status_code == 401:
-                        print("⚠️ [MRKT] التوكن انتهت صلاحيته، سيتم التجديد...")
+                        print("⚠️ [MRKT] التوكن انتهت صلاحيته، سيتم التجديد تلقائياً...")
                         mrkt_token = None 
                         continue
                     
