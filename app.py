@@ -27,7 +27,7 @@ from curl_cffi.requests import AsyncSession
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.ERROR) 
 logging.getLogger("websockets").setLevel(logging.WARNING)
-logging.getLogger("pyrogram").setLevel(logging.ERROR)
+logging.getLogger("pyrogram").setLevel(logging.ERROR) # تم كتم بايروجرام لتجنب الرسائل المزعجة
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
@@ -41,7 +41,7 @@ DB_FILE = "tonnel_db.json"
 PYRO_API_ID = int(os.environ.get("PYRO_API_ID", 12345678)) 
 PYRO_API_HASH = os.environ.get("PYRO_API_HASH", "PUT_YOUR_API_HASH_HERE")
 
-# سحب الجلسة من السيكرت (يدعم Session File و String Session بذكاء)
+# سحب الجلسة من السيكرت + إغلاق التحديثات لمنع الكراش نهائياً
 RAW_SESSION = os.environ.get("SESSION_NAME", "mrkt_session")
 if len(RAW_SESSION) > 50:
     pyro_client = PyroClient(
@@ -49,13 +49,15 @@ if len(RAW_SESSION) > 50:
         api_id=PYRO_API_ID,
         api_hash=PYRO_API_HASH,
         session_string=RAW_SESSION,
-        in_memory=True
+        in_memory=True,
+        no_updates=True # 🚀 هذا السطر يمنع تشنج البوت وانهياره
     )
 else:
     pyro_client = PyroClient(
         name=RAW_SESSION,
         api_id=PYRO_API_ID,
-        api_hash=PYRO_API_HASH
+        api_hash=PYRO_API_HASH,
+        no_updates=True # 🚀 هذا السطر يمنع تشنج البوت وانهياره
     )
 
 # نظام الكاش والبيانات
@@ -175,8 +177,17 @@ def format_exact_price(price):
     return f"{price:.6f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# MRKT API Functions (بالاعتماد على Pyrogram)
+# الدوال الأساسية لسيرفر MRKT 
 # ==========================================
+def make_mrkt_headers(token):
+    return {
+        "Authorization": str(token),
+        "Referer": "https://cdn.tgmrkt.io/",
+        "Origin": "https://cdn.tgmrkt.io",
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
 async def get_mrkt_auth_token():
     global pyro_client
     try:
@@ -185,17 +196,14 @@ async def get_mrkt_auth_token():
             await pyro_client.connect()
             
         try:
-            # نجلب بيانات البوت حتى نتأكد إن الجلسة صحيحة وشغالة بدون ما يعلق
-            await pyro_client.get_users('mrkt')
             peer = await pyro_client.resolve_peer('mrkt')
+            bot = InputUser(user_id=peer.user_id, access_hash=peer.access_hash)
+            bot_app = InputBotAppShortName(bot_id=bot, short_name="app")
         except Exception as e:
-            print(f"⚠️ [MRKT] خطأ: الجلسة غير مسجلة دخول! تأكد من ملف الجلسة أو السيكرت. التفاصيل: {e}")
+            print(f"⚠️ [MRKT] خطأ: الجلسة غير صالحة. التفاصيل: {e}")
             return None
 
         print("✅ [MRKT] الحساب متصل. جاري جلب بيانات WebView...")
-        bot = InputUser(user_id=peer.user_id, access_hash=peer.access_hash)
-        bot_app = InputBotAppShortName(bot_id=bot, short_name="app")
-
         web_view = await pyro_client.invoke(
             RequestAppWebView(
                 peer=peer,
@@ -205,11 +213,9 @@ async def get_mrkt_auth_token():
             )
         )
 
-        url = web_view.url
-        init_data = url.split("tgWebAppData=", 1)[1].split("&tgWebAppVersion", 1)[0]
-        init_data = unquote(init_data)
+        init_data = unquote(web_view.url.split('tgWebAppData=', 1)[1].split('&tgWebAppVersion', 1)[0])
 
-        print("🔄 [MRKT] تم استخراج بيانات المصادقة. جاري جلب التوكن من السيرفر...")
+        print("🔄 [MRKT] جاري جلب التوكن من السيرفر...")
         async with AsyncSession(impersonate="chrome") as s:
             r = await s.post(
                 "https://api.tgmrkt.io/api/v1/auth", 
@@ -236,16 +242,19 @@ async def mrkt_updater_loop():
                 mrkt_token = await get_mrkt_auth_token()
             
             if mrkt_token:
-                headers = {'Authorization': str(mrkt_token), 'Referer': 'https://cdn.tgmrkt.io/'}
+                # يجب أن يتطابق الـ JSON بدقة لتجنب رفض السيرفر (Error 401/400)
                 json_data = {
                     "collectionNames": [], "modelNames": [], "backdropNames": [], "symbolNames": [],
-                    "ordering": "Price", "lowToHigh": True, "count": 1, "cursor": '', "promotedFirst": False
+                    "ordering": "Price", "lowToHigh": True, "maxPrice": None, "minPrice": None,
+                    "mintable": None, "number": None, "count": 20, "cursor": "", "query": None, "promotedFirst": False
                 }
                 async with AsyncSession(impersonate="chrome") as s:
-                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
+                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=make_mrkt_headers(mrkt_token), json=json_data)
+                    
                     if r.status_code == 401:
-                        print("⚠️ [MRKT] التوكن انتهت صلاحيته، سيتم التجديد تلقائياً...")
+                        print("⚠️ [MRKT] السيرفر رفض التوكن، سيتم إعادة توليده...")
                         mrkt_token = None 
+                        await asyncio.sleep(2) # حماية من اللوب السريع
                         continue
                     
                     if r.status_code == 200:
@@ -269,8 +278,7 @@ async def mrkt_updater_loop():
                                 mrkt_floor['url_mrkt'] = f"https://t.me/mrkt/app?startapp={gift_id}"
                                 clean_url_name = mrkt_floor['name'].lower().replace(' ', '')
                                 mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
-        except Exception:
-            pass
+        except Exception: pass
         await asyncio.sleep(15) 
 
 # ==========================================
@@ -1154,18 +1162,18 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
 
     exact_name = resolve_gift_name_mrkt(raw_query)
-    headers = {'Authorization': str(mrkt_token), 'Referer': 'https://cdn.tgmrkt.io/'}
     
     found_gift = None
     cursor = ""
     for _ in range(5): 
         json_data = {
             "collectionNames": [exact_name] if exact_name else [], "modelNames": [], "backdropNames": [], "symbolNames": [],
-            "ordering": "Price", "lowToHigh": True, "count": 20, "cursor": cursor, "promotedFirst": False
+            "ordering": "Price", "lowToHigh": True, "maxPrice": None, "minPrice": None,
+            "mintable": None, "number": None, "count": 20, "cursor": cursor, "query": None, "promotedFirst": False
         }
         try:
             async with AsyncSession(impersonate="chrome") as s:
-                r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
+                r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=make_mrkt_headers(mrkt_token), json=json_data)
                 if r.status_code == 401:
                     mrkt_token = None
                     await edit_custom_msg(chat_id, msg_wait, f"انتهت صلاحية الاتصال بـ MRKT، حاول مرة أخرى. {WARN_EMOJI}")
