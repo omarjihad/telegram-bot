@@ -23,11 +23,11 @@ from pyrogram.raw.functions.messages import RequestAppWebView
 from pyrogram.raw.types import InputBotAppShortName, InputUser
 from curl_cffi.requests import AsyncSession
 
-# إخفاء اللوجات المزعجة
+# إخفاء اللوجات المزعجة وتحذيرات PTB
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.ERROR)
 logging.getLogger("websockets").setLevel(logging.WARNING)
-logging.getLogger("pyrogram").setLevel(logging.WARNING)
+logging.getLogger("pyrogram").setLevel(logging.ERROR)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
@@ -36,13 +36,22 @@ ADMIN_IDS = [7126816492, 1955081272]
 DB_FILE = "tonnel_db.json"
 
 # ==========================================
-# إعدادات جلسة Pyrogram لـ MRKT (اسحبها من الاستضافة أو ضعها هنا)
+# إعدادات جلسة Pyrogram لـ MRKT
 # ==========================================
-PYRO_API_ID = int(os.environ.get("PYRO_API_ID", 12345678)) # ضع الايدي الخاص بك هنا أو في الاستضافة
+# ضع الـ API_ID والـ API_HASH الخاصة بك هنا أو في السيكرت
+PYRO_API_ID = int(os.environ.get("PYRO_API_ID", 12345678)) 
 PYRO_API_HASH = os.environ.get("PYRO_API_HASH", "PUT_YOUR_API_HASH_HERE")
-SESSION_NAME = "mrkt_session" # سيقوم بإنشاء ملف mrkt_session.session
 
-pyro_client = PyroClient(SESSION_NAME, PYRO_API_ID, PYRO_API_HASH)
+# سحب الجلسة من السيكرت الذي قمت بإنشائه باسم SESSION_NAME
+SESSION_STRING = os.environ.get("SESSION_NAME")
+
+pyro_client = PyroClient(
+    name="mrkt_session",
+    api_id=PYRO_API_ID,
+    api_hash=PYRO_API_HASH,
+    session_string=SESSION_STRING,
+    in_memory=True if SESSION_STRING else False
+)
 
 # نظام الكاش والبيانات
 CACHE_TIME = 2
@@ -165,6 +174,7 @@ def format_exact_price(price):
 # ==========================================
 async def get_mrkt_auth_token():
     try:
+        # استخدام connect بدلاً من start لمنع تجميد البوت إذا كانت الجلسة خطأ
         if not pyro_client.is_connected:
             await pyro_client.connect()
             
@@ -191,7 +201,7 @@ async def get_mrkt_auth_token():
             if rj:
                 return rj.get('token', None)
     except Exception as e:
-        print(f"⚠️ خطأ في تسجيل الدخول لـ MRKT: {e}")
+        print(f"⚠️ خطأ في الاتصال بـ MRKT: {e}")
     return None
 
 async def mrkt_updater_loop():
@@ -210,7 +220,7 @@ async def mrkt_updater_loop():
                 async with AsyncSession(impersonate="chrome") as s:
                     r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
                     if r.status_code == 401:
-                        mrkt_token = None # Token expired
+                        mrkt_token = None 
                         continue
                     
                     if r.status_code == 200:
@@ -234,12 +244,12 @@ async def mrkt_updater_loop():
                                 mrkt_floor['url_mrkt'] = f"https://t.me/mrkt/app?startapp={gift_id}"
                                 clean_url_name = mrkt_floor['name'].lower().replace(' ', '')
                                 mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
-        except Exception as e:
+        except Exception:
             pass
-        await asyncio.sleep(10) # تحديث فلور ماركت كل 10 ثواني
+        await asyncio.sleep(15) 
 
 # ==========================================
-# دالة إرسال الرسائل وتعديلها (مع إمكانية تخطي زر الأخبار)
+# دالة إرسال الرسائل وتعديلها
 # ==========================================
 async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None, skip_news=False):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -322,7 +332,7 @@ async def floor_updater_loop():
                         gift_floor['url_tonnel'] = f"https://t.me/tonnel_network_bot/gift?startapp={lowest_gift_id}"
                         if gift_num: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}"
                         else: gift_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
-                except Exception as e: pass
+                except Exception: pass
             else:
                 gift_floor['price'] = "0"
                 gift_floor['name'] = "لا توجد هدايا معروضة"
@@ -397,7 +407,7 @@ async def tonnel_websocket_loop():
                         if event.get('type') == "marketplace.connected": continue
                         await process_event(event)
                     except json.JSONDecodeError: pass
-        except Exception as e: 
+        except Exception: 
             await asyncio.sleep(2)
 
 # ==========================================
@@ -992,9 +1002,7 @@ async def check_alerts_loop(app: Application):
         alerts_db = [a for a in alerts_db if a['active']]
 
 async def post_init(app: Application):
-    if not pyro_client.is_connected:
-        try: await pyro_client.start()
-        except Exception: pass
+    # تم إزالة pyrogram.start() من هنا لكي لا تعلق البوت! سيتم الاتصال عبر mrkt_updater_loop بالخلفية.
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
     asyncio.create_task(tonnel_websocket_loop()) 
@@ -1023,8 +1031,6 @@ def resolve_gift_name_mrkt(search_term):
 async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     msg = f"{SEARCH_EMOJI} <b>بحث عن هدية</b>\n\nاختر السوق الذي تريد البحث فيه:"
-    
-    # تنسيق الأزرار كما طلبت: مركت، تونيل (واحد تحت الثاني)، والإلغاء والأخبار (بصف بعض)
     btn = [
         [{"text": "بحث في مركت", "callback_data": "search_mrkt", "style": "success", "icon_custom_emoji_id": MRKT_ICON_ID}],
         [{"text": "بحث في تونيل", "callback_data": "search_tonnel", "style": "danger", "icon_custom_emoji_id": TONNEL_ICON_ID}],
@@ -1128,7 +1134,7 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
     
     found_gift = None
     cursor = ""
-    for _ in range(5): # 5 pages max
+    for _ in range(5): 
         json_data = {
             "collectionNames": [exact_name] if exact_name else [], "modelNames": [], "backdropNames": [], "symbolNames": [],
             "ordering": "Price", "lowToHigh": True, "count": 20, "cursor": cursor, "promotedFirst": False
@@ -1187,7 +1193,6 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
 
     await edit_custom_msg(chat_id, msg_wait, f"عذراً، لم أتمكن من العثور على الهدية في مركت. {FAIL_EMOJI}")
     return ConversationHandler.END
-
 
 # --- معالجة الرسائل العامة ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1316,7 +1321,6 @@ def main():
         fallbacks=cancel_handlers
     )
     
-    # تحديث نظام البحث (التوجيه المتعدد)
     search_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^/?بحث هدية$|/?بحث$'), gift_search_start)],
         states={
