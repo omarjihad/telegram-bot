@@ -27,7 +27,7 @@ from curl_cffi.requests import AsyncSession
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.ERROR) 
 logging.getLogger("websockets").setLevel(logging.WARNING)
-logging.getLogger("pyrogram").setLevel(logging.ERROR) # تم كتم بايروجرام لتجنب الرسائل المزعجة
+logging.getLogger("pyrogram").setLevel(logging.ERROR)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
@@ -41,7 +41,7 @@ DB_FILE = "tonnel_db.json"
 PYRO_API_ID = int(os.environ.get("PYRO_API_ID", 12345678)) 
 PYRO_API_HASH = os.environ.get("PYRO_API_HASH", "PUT_YOUR_API_HASH_HERE")
 
-# سحب الجلسة من السيكرت + إغلاق التحديثات لمنع الكراش نهائياً
+# سحب الجلسة من السيكرت + إغلاق التحديثات لمنع الكراش
 RAW_SESSION = os.environ.get("SESSION_NAME", "mrkt_session")
 if len(RAW_SESSION) > 50:
     pyro_client = PyroClient(
@@ -50,14 +50,14 @@ if len(RAW_SESSION) > 50:
         api_hash=PYRO_API_HASH,
         session_string=RAW_SESSION,
         in_memory=True,
-        no_updates=True # 🚀 هذا السطر يمنع تشنج البوت وانهياره
+        no_updates=True
     )
 else:
     pyro_client = PyroClient(
         name=RAW_SESSION,
         api_id=PYRO_API_ID,
         api_hash=PYRO_API_HASH,
-        no_updates=True # 🚀 هذا السطر يمنع تشنج البوت وانهياره
+        no_updates=True
     )
 
 # نظام الكاش والبيانات
@@ -138,13 +138,13 @@ NUM_EMOJIS = {1: '1️⃣', 2: '2️⃣', 3: '3️⃣', 4: '4️⃣', 5: '5️�
 
 CANCEL_BTN = [{"text": "الغاء", "callback_data": "cancel", "style": "primary", "icon_custom_emoji_id": "5440681540541502133"}]
 
-# قواميس بحث MRKT
 ALIASES = {
     "durov": "Durov’s Figurine", "pavel": "Durov’s Figurine", "pepe": "Plush Pepe",
     "cap": "Durov’s Cap", "boots": "Durov’s Boots", "coat": "Durov’s Coat",
     "glasses": "Durov’s Glasses", "liberty": "Liberty Figure", "ufc": "UFC Strike",
     "star": "Star", "box": "Box", "gift": "Gift", "heart": "Heart", "rose": "Rose"
 }
+
 KNOWN_GIFTS = [
     "Durov’s Cap", "Durov’s Boots", "Durov’s Coat", "Durov’s Figurine", "Durov’s Glasses", 
     "Khabib’s Papakha", "Snoop Dogg", "Snoop Cigar", "Plush Pepe", "Lol Pop", "Fine Pen", 
@@ -177,22 +177,31 @@ def format_exact_price(price):
     return f"{price:.6f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# الدوال الأساسية لسيرفر MRKT 
+# هيكل JSON مطابق 100% للسيرفر
 # ==========================================
-def make_mrkt_headers(token):
+def get_mrkt_payload(collections=None, cursor=""):
     return {
-        "Authorization": str(token),
-        "Referer": "https://cdn.tgmrkt.io/",
-        "Origin": "https://cdn.tgmrkt.io",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+        "collectionNames": collections or [],
+        "modelNames": [],
+        "backdropNames": [],
+        "symbolNames": [],
+        "ordering": "Price",
+        "lowToHigh": True,
+        "maxPrice": None,
+        "minPrice": None,
+        "mintable": None,
+        "number": None,
+        "count": 20, # تم تثبيت Count على 20 كالأصل
+        "cursor": cursor,
+        "query": None,
+        "promotedFirst": False,
     }
 
 async def get_mrkt_auth_token():
     global pyro_client
     try:
         if not pyro_client.is_connected:
-            print("🔄 [MRKT] جاري الاتصال بحساب تيليجرام (Pyrogram)...")
+            print("🔄 [MRKT] جاري الاتصال بحساب تيليجرام...")
             await pyro_client.connect()
             
         try:
@@ -200,38 +209,26 @@ async def get_mrkt_auth_token():
             bot = InputUser(user_id=peer.user_id, access_hash=peer.access_hash)
             bot_app = InputBotAppShortName(bot_id=bot, short_name="app")
         except Exception as e:
-            print(f"⚠️ [MRKT] خطأ: الجلسة غير صالحة. التفاصيل: {e}")
+            print(f"⚠️ [MRKT] خطأ في تفاصيل الجلسة: {e}")
             return None
 
-        print("✅ [MRKT] الحساب متصل. جاري جلب بيانات WebView...")
         web_view = await pyro_client.invoke(
-            RequestAppWebView(
-                peer=peer,
-                app=bot_app,
-                platform="android",
-                write_allowed=True
-            )
+            RequestAppWebView(peer=peer, app=bot_app, platform="android", write_allowed=True)
         )
-
         init_data = unquote(web_view.url.split('tgWebAppData=', 1)[1].split('&tgWebAppVersion', 1)[0])
 
-        print("🔄 [MRKT] جاري جلب التوكن من السيرفر...")
         async with AsyncSession(impersonate="chrome") as s:
-            r = await s.post(
-                "https://api.tgmrkt.io/api/v1/auth", 
-                json={"data": init_data},
-                headers={"Referer": "https://cdn.tgmrkt.io/", "Origin": "https://cdn.tgmrkt.io", "Accept": "application/json"}
-            )
+            r = await s.post("https://api.tgmrkt.io/api/v1/auth", json={"data": init_data})
             if r.status_code == 200:
                 token = r.json().get('token')
                 if token:
                     print("🎉 [MRKT] تم الحصول على التوكن بنجاح!")
                     return token
             else:
-                print(f"⚠️ [MRKT] فشل جلب التوكن، كود الخطأ: {r.status_code}")
+                print(f"⚠️ [MRKT] فشل استخراج التوكن. الرد: {r.status_code}")
                 
     except Exception as e:
-        print(f"⚠️ [MRKT] حدث خطأ عام: {e}")
+        print(f"⚠️ [MRKT] حدث خطأ: {e}")
     return None
 
 async def mrkt_updater_loop():
@@ -242,24 +239,21 @@ async def mrkt_updater_loop():
                 mrkt_token = await get_mrkt_auth_token()
             
             if mrkt_token:
-                # يجب أن يتطابق الـ JSON بدقة لتجنب رفض السيرفر (Error 401/400)
-                json_data = {
-                    "collectionNames": [], "modelNames": [], "backdropNames": [], "symbolNames": [],
-                    "ordering": "Price", "lowToHigh": True, "maxPrice": None, "minPrice": None,
-                    "mintable": None, "number": None, "count": 20, "cursor": "", "query": None, "promotedFirst": False
-                }
+                headers = {'Authorization': str(mrkt_token), 'Referer': 'https://cdn.tgmrkt.io/'}
+                json_data = get_mrkt_payload() # يجلب Payload كامل لا ينقصه شيء
+                
                 async with AsyncSession(impersonate="chrome") as s:
-                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=make_mrkt_headers(mrkt_token), json=json_data)
+                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
                     
-                    if r.status_code == 401:
-                        print("⚠️ [MRKT] السيرفر رفض التوكن، سيتم إعادة توليده...")
+                    if r.status_code in [401, 403]:
+                        print("⚠️ [MRKT] تم رفض التوكن، سيتم إعادة المحاولة بعد 10 ثواني...")
                         mrkt_token = None 
-                        await asyncio.sleep(2) # حماية من اللوب السريع
+                        await asyncio.sleep(10)
                         continue
                     
                     if r.status_code == 200:
-                        rj = r.json()
-                        gifts = rj.get('gifts', [])
+                        data = r.json()
+                        gifts = data.get('gifts', [])
                         if gifts:
                             cheapest = gifts[0]
                             price = None
@@ -279,7 +273,7 @@ async def mrkt_updater_loop():
                                 clean_url_name = mrkt_floor['name'].lower().replace(' ', '')
                                 mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
         except Exception: pass
-        await asyncio.sleep(15) 
+        await asyncio.sleep(15)
 
 # ==========================================
 # دالة إرسال الرسائل وتعديلها
@@ -373,17 +367,14 @@ async def floor_updater_loop():
 
 async def process_event(event):
     global active_listings, last_event_id, seen_events, needs_db_save
-    
     ev_id = event.get('eventId')
     if not ev_id: return
-    
     if ev_id in seen_events: return
     seen_events.add(ev_id)
     if len(seen_events) > 10000: seen_events.clear()
     
     ev_type = event.get('type')
     ev_data = event.get('data', {})
-    
     gift_info = ev_data.get('gift')
     if not gift_info and 'gift_id' in ev_data: gift_info = ev_data
     gift_id = str(gift_info.get('gift_id')) if gift_info else None
@@ -431,7 +422,6 @@ async def tonnel_websocket_loop():
         await replay_events() 
         global needs_db_save
         needs_db_save = True 
-        
         try:
             async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as websocket:
                 async for message in websocket:
@@ -444,11 +434,10 @@ async def tonnel_websocket_loop():
             await asyncio.sleep(2)
 
 # ==========================================
-# نظام الريسيت المتطور (Reset)
+# نظام الريسيت المتطور
 # ==========================================
 async def reset_market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return
-    
     msg = "اختر السوق الذي تريد عمل تفريغ (Reset) له:"
     btn = [
         [{"text": "مركت (MRKT)", "callback_data": "reset_mrkt", "style": "primary", "icon_custom_emoji_id": MRKT_ICON_ID}],
@@ -485,7 +474,6 @@ async def handle_reset_callback(update: Update, context: ContextTypes.DEFAULT_TY
     txt = "✅ تم تفريغ السوق وجلب البيانات الجديدة بنجاح."
     await edit_custom_msg(chat_id, msg_id, txt, skip_news=True)
 
-
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in bot_users: bot_users.add(user.id)
     if user.username: user_mapping[user.username.lower()] = user.id
@@ -501,11 +489,9 @@ async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not update.effective_user: return False
     user_id = update.effective_user.id
-    
     if user_id in banned_users:
         msg = update.message
         if not msg or not msg.text: return True
-        
         chat_type = msg.chat.type
         text = msg.text.lower()
         trigger_warning = False
@@ -698,9 +684,6 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
         await edit_custom_msg(chat_id, msg_id, f"عنوان المحفضه خطا ! {FAIL_EMOJI}")
     return ConversationHandler.END
 
-# ==========================================
-# أنظمة الصرافة والأسعار
-# ==========================================
 def normalize_currency(curr_str):
     curr = curr_str.lower().strip()
     if curr in ['دولار', 'usdt', 'usd']: return 'USD'
@@ -862,9 +845,6 @@ def generate_conversion_msg(amount, currency_str):
     msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
     return msg
 
-# ==========================================
-# نظام التنبيهات
-# ==========================================
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     msg = f"{WHALE_BELL} <b>نظام التنبيهات الذكي</b>\n\nاكتب اسم العملة اللي تريد أراقبها (مثال: جرام، بتكوين، باث، ماستر...):"
@@ -1041,9 +1021,6 @@ async def post_init(app: Application):
     asyncio.create_task(floor_updater_loop())
     asyncio.create_task(mrkt_updater_loop())
 
-# ==========================================
-# نظام بحث الهدايا الدقيق (تونيل + مركت)
-# ==========================================
 def resolve_gift_name_mrkt(search_term):
     if not search_term: return ""
     s = search_term.lower().replace("'", "").replace("’", "").replace("-", " ").strip()
@@ -1075,11 +1052,9 @@ async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_market_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     chat_id = query.message.chat.id
     msg_id = query.message.message_id
     data = query.data
-    
     if data == "search_tonnel":
         await edit_custom_msg(chat_id, msg_id, f"{TONNEL_ICON_ID} أرسل اسم الهدية (أو رابطها) للبحث في <b>تونيل</b>:", extra_buttons=[CANCEL_BTN], skip_news=True)
         return ASK_GIFT_SEARCH_TONNEL
@@ -1166,15 +1141,13 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
     found_gift = None
     cursor = ""
     for _ in range(5): 
-        json_data = {
-            "collectionNames": [exact_name] if exact_name else [], "modelNames": [], "backdropNames": [], "symbolNames": [],
-            "ordering": "Price", "lowToHigh": True, "maxPrice": None, "minPrice": None,
-            "mintable": None, "number": None, "count": 20, "cursor": cursor, "query": None, "promotedFirst": False
-        }
+        json_data = get_mrkt_payload([exact_name] if exact_name else [], cursor)
         try:
             async with AsyncSession(impersonate="chrome") as s:
-                r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=make_mrkt_headers(mrkt_token), json=json_data)
-                if r.status_code == 401:
+                headers = {"Authorization": str(mrkt_token), "Referer": "https://cdn.tgmrkt.io/", "Content-Type": "application/json"}
+                r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
+                
+                if r.status_code in [401, 403]:
                     mrkt_token = None
                     await edit_custom_msg(chat_id, msg_wait, f"انتهت صلاحية الاتصال بـ MRKT، حاول مرة أخرى. {WARN_EMOJI}")
                     return ConversationHandler.END
@@ -1226,7 +1199,6 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
     await edit_custom_msg(chat_id, msg_wait, f"عذراً، لم أتمكن من العثور على الهدية في مركت. {FAIL_EMOJI}")
     return ConversationHandler.END
 
-# --- معالجة الرسائل العامة ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     original_text = update.message.text.strip()
