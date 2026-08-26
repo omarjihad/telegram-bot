@@ -76,6 +76,9 @@ whale_alert_users = {}
 banned_users = set() 
 user_mapping = {} 
 
+# جلسة HTTP الموحدة لحفظ الكوكيز (أساس المشكلة)
+mrkt_http = None
+
 # حالات المحادثة
 ASK_CURRENCY, ASK_PRICE = range(2)
 ASK_WALLET = 3 
@@ -191,14 +194,26 @@ def get_mrkt_payload(collections=None, cursor=""):
         "minPrice": None,
         "mintable": None,
         "number": None,
-        "count": 20, # تم تثبيت Count على 20 كالأصل
+        "count": 50, # تم إرجاعها إلى 50 كما في الكود الأصلي
         "cursor": cursor,
         "query": None,
         "promotedFirst": False,
     }
 
+def make_mrkt_headers(token):
+    return {
+        "Authorization": str(token),
+        "Referer": "https://cdn.tgmrkt.io/",
+        "Origin": "https://cdn.tgmrkt.io",
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+
+# ==========================================
+# دوال سيرفر MRKT وحفظ الكوكيز
+# ==========================================
 async def get_mrkt_auth_token():
-    global pyro_client
+    global pyro_client, mrkt_http
     try:
         if not pyro_client.is_connected:
             print("🔄 [MRKT] جاري الاتصال بحساب تيليجرام...")
@@ -217,61 +232,66 @@ async def get_mrkt_auth_token():
         )
         init_data = unquote(web_view.url.split('tgWebAppData=', 1)[1].split('&tgWebAppVersion', 1)[0])
 
-        async with AsyncSession(impersonate="chrome") as s:
-            r = await s.post("https://api.tgmrkt.io/api/v1/auth", json={"data": init_data})
-            if r.status_code == 200:
-                token = r.json().get('token')
-                if token:
-                    print("🎉 [MRKT] تم الحصول على التوكن بنجاح!")
-                    return token
-            else:
-                print(f"⚠️ [MRKT] فشل استخراج التوكن. الرد: {r.status_code}")
+        print("🔄 [MRKT] جاري جلب التوكن من السيرفر...")
+        # استخدام الجلسة الموحدة التي تحفظ الكوكيز
+        r = await mrkt_http.post(
+            "https://api.tgmrkt.io/api/v1/auth", 
+            json={"data": init_data},
+            headers={"Referer": "https://cdn.tgmrkt.io/", "Origin": "https://cdn.tgmrkt.io", "Accept": "application/json"}
+        )
+        if r.status_code == 200:
+            token = r.json().get('token')
+            if token:
+                print("🎉 [MRKT] تم الحصول على التوكن بنجاح وحفظ الكوكيز!")
+                return token
+        else:
+            print(f"⚠️ [MRKT] فشل استخراج التوكن. الرد: {r.status_code}")
                 
     except Exception as e:
         print(f"⚠️ [MRKT] حدث خطأ: {e}")
     return None
 
 async def mrkt_updater_loop():
-    global mrkt_token, mrkt_floor
+    global mrkt_token, mrkt_floor, mrkt_http
     while True:
         try:
             if not mrkt_token:
                 mrkt_token = await get_mrkt_auth_token()
             
-            if mrkt_token:
-                headers = {'Authorization': str(mrkt_token), 'Referer': 'https://cdn.tgmrkt.io/'}
-                json_data = get_mrkt_payload() # يجلب Payload كامل لا ينقصه شيء
+            if mrkt_token and mrkt_http:
+                headers = make_mrkt_headers(mrkt_token)
+                json_data = get_mrkt_payload([], cursor="")
                 
-                async with AsyncSession(impersonate="chrome") as s:
-                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
-                    
-                    if r.status_code in [401, 403]:
-                        print("⚠️ [MRKT] تم رفض التوكن، سيتم إعادة المحاولة بعد 10 ثواني...")
-                        mrkt_token = None 
-                        await asyncio.sleep(10)
-                        continue
-                    
-                    if r.status_code == 200:
-                        data = r.json()
-                        gifts = data.get('gifts', [])
-                        if gifts:
-                            cheapest = gifts[0]
-                            price = None
-                            for key in ["salePrice", "salePriceWithoutFee", "floorPriceNanoTONsByCollection"]:
-                                val = cheapest.get(key)
-                                if isinstance(val, (int, float)) and val > 0:
-                                    price = int(val)
-                                    break
+                # استخدام الجلسة الموحدة (ترسل التوكن + الكوكيز)
+                r = await mrkt_http.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
+                
+                if r.status_code in [401, 403]:
+                    print("⚠️ [MRKT] تم رفض التوكن، سيتم تحديث الجلسة...")
+                    mrkt_token = None 
+                    await asyncio.sleep(10)
+                    continue
+                
+                if r.status_code == 200:
+                    data = r.json()
+                    gifts = data.get('gifts', [])
+                    if gifts:
+                        cheapest = gifts[0]
+                        price = None
+                        for key in ["salePrice", "salePriceWithoutFee", "floorPriceNanoTONsByCollection"]:
+                            val = cheapest.get(key)
+                            if isinstance(val, (int, float)) and val > 0:
+                                price = int(val)
+                                break
+                        
+                        if price:
+                            ton_price = price / 1_000_000_000
+                            mrkt_floor['price'] = format_exact_price(ton_price)
+                            mrkt_floor['name'] = cheapest.get("title") or cheapest.get("collectionTitle") or cheapest.get("collectionName") or "Unknown"
                             
-                            if price:
-                                ton_price = price / 1_000_000_000
-                                mrkt_floor['price'] = format_exact_price(ton_price)
-                                mrkt_floor['name'] = cheapest.get("title") or cheapest.get("collectionTitle") or cheapest.get("collectionName") or "Unknown"
-                                
-                                gift_id = cheapest.get("id")
-                                mrkt_floor['url_mrkt'] = f"https://t.me/mrkt/app?startapp={gift_id}"
-                                clean_url_name = mrkt_floor['name'].lower().replace(' ', '')
-                                mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
+                            gift_id = cheapest.get("id")
+                            mrkt_floor['url_mrkt'] = f"https://t.me/mrkt/app?startapp={gift_id}"
+                            clean_url_name = mrkt_floor['name'].lower().replace(' ', '')
+                            mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}"
         except Exception: pass
         await asyncio.sleep(15)
 
@@ -367,14 +387,17 @@ async def floor_updater_loop():
 
 async def process_event(event):
     global active_listings, last_event_id, seen_events, needs_db_save
+    
     ev_id = event.get('eventId')
     if not ev_id: return
+    
     if ev_id in seen_events: return
     seen_events.add(ev_id)
     if len(seen_events) > 10000: seen_events.clear()
     
     ev_type = event.get('type')
     ev_data = event.get('data', {})
+    
     gift_info = ev_data.get('gift')
     if not gift_info and 'gift_id' in ev_data: gift_info = ev_data
     gift_id = str(gift_info.get('gift_id')) if gift_info else None
@@ -422,6 +445,7 @@ async def tonnel_websocket_loop():
         await replay_events() 
         global needs_db_save
         needs_db_save = True 
+        
         try:
             async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=20) as websocket:
                 async for message in websocket:
@@ -1015,6 +1039,9 @@ async def check_alerts_loop(app: Application):
         alerts_db = [a for a in alerts_db if a['active']]
 
 async def post_init(app: Application):
+    global mrkt_http
+    mrkt_http = AsyncSession(impersonate="chrome")
+    
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
     asyncio.create_task(tonnel_websocket_loop()) 
@@ -1129,45 +1156,42 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
     
     msg_wait = await send_custom_msg(chat_id, f"جاري البحث في مركت عن <b>{raw_query}</b>... {SEARCH_EMOJI}", msg_id)
     
-    global mrkt_token
+    global mrkt_token, mrkt_http
     if not mrkt_token: mrkt_token = await get_mrkt_auth_token()
     
-    if not mrkt_token:
+    if not mrkt_token or not mrkt_http:
         await edit_custom_msg(chat_id, msg_wait, f"عذراً، يوجد مشكلة في الاتصال بـ MRKT حالياً. {WARN_EMOJI}")
         return ConversationHandler.END
 
     exact_name = resolve_gift_name_mrkt(raw_query)
-    
     found_gift = None
     cursor = ""
     for _ in range(5): 
         json_data = get_mrkt_payload([exact_name] if exact_name else [], cursor)
         try:
-            async with AsyncSession(impersonate="chrome") as s:
-                headers = {"Authorization": str(mrkt_token), "Referer": "https://cdn.tgmrkt.io/", "Content-Type": "application/json"}
-                r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
+            r = await mrkt_http.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=make_mrkt_headers(mrkt_token), json=json_data)
+            
+            if r.status_code in [401, 403]:
+                mrkt_token = None
+                await edit_custom_msg(chat_id, msg_wait, f"انتهت صلاحية الاتصال بـ MRKT، حاول مرة أخرى. {WARN_EMOJI}")
+                return ConversationHandler.END
+            
+            if r.status_code == 200:
+                data = r.json()
+                gifts = data.get("gifts", [])
+                for g in gifts:
+                    if isinstance(g, dict) and g.get("isOnSale") is not False:
+                        returned_name = g.get("collectionName", "").lower().replace("'", "").replace("’", "")
+                        target_name = exact_name.lower().replace("'", "").replace("’", "")
+                        if target_name in returned_name:
+                            found_gift = g
+                            break
+                if found_gift: break
                 
-                if r.status_code in [401, 403]:
-                    mrkt_token = None
-                    await edit_custom_msg(chat_id, msg_wait, f"انتهت صلاحية الاتصال بـ MRKT، حاول مرة أخرى. {WARN_EMOJI}")
-                    return ConversationHandler.END
-                
-                if r.status_code == 200:
-                    data = r.json()
-                    gifts = data.get("gifts", [])
-                    for g in gifts:
-                        if isinstance(g, dict) and g.get("isOnSale") is not False:
-                            returned_name = g.get("collectionName", "").lower().replace("'", "").replace("’", "")
-                            target_name = exact_name.lower().replace("'", "").replace("’", "")
-                            if target_name in returned_name:
-                                found_gift = g
-                                break
-                    if found_gift: break
-                    
-                    next_cursor = data.get("cursor")
-                    if not next_cursor or next_cursor == cursor: break
-                    cursor = next_cursor
-                else: break
+                next_cursor = data.get("cursor")
+                if not next_cursor or next_cursor == cursor: break
+                cursor = next_cursor
+            else: break
         except: break
 
     if found_gift:
