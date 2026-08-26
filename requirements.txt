@@ -6,3 +6,4 @@ httpx
 pyrogram
 TgCrypto
 curl_cffi
+telethon
