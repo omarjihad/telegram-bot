@@ -336,6 +336,86 @@ async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None, skip_ne
         except Exception: pass
 
 # ==========================================
+# نظام الحظر وإلغاء الحظر
+# ==========================================
+async def process_ban(chat_id, msg_id, target_input, context):
+    target_id, target_name = None, target_input
+    if target_input.startswith('@'):
+        username = target_input.replace('@', '').lower()
+        if username in user_mapping: target_id = user_mapping[username]
+    elif target_input.isdigit(): target_id = int(target_input)
+        
+    if target_id:
+        if target_id in ADMIN_IDS:
+            await send_custom_msg(chat_id, f"عذراً، لا يمكنك حظر المطورين! {WARN_EMOJI}", msg_id)
+        else:
+            banned_users.add(target_id)
+            await send_custom_msg(chat_id, f"✅ تم حظر {target_name} بنجاح.", msg_id)
+    else:
+        await send_custom_msg(chat_id, f"عذراً، لم أتمكن من العثور على هذا المستخدم في سجلاتي. {WARN_EMOJI}", msg_id)
+
+async def ban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMIN_IDS: return ConversationHandler.END
+    if update.message.reply_to_message:
+        target_id = update.message.reply_to_message.from_user.id
+        target_name = update.message.reply_to_message.from_user.first_name
+        if target_id in ADMIN_IDS:
+            await send_custom_msg(update.message.chat_id, f"عذراً، لا يمكنك حظر المطورين! {WARN_EMOJI}", update.message.message_id)
+        else:
+            banned_users.add(target_id)
+            await send_custom_msg(update.message.chat_id, f"✅ تم حظر {target_name} بنجاح.", update.message.message_id)
+        return ConversationHandler.END
+    
+    parts = update.message.text.split()
+    if len(parts) > 1:
+        await process_ban(update.message.chat_id, update.message.message_id, parts[1], context)
+        return ConversationHandler.END
+
+    await send_custom_msg(update.message.chat_id, "ارسل ايدي او يوزر الشخص لحظره:", update.message.message_id, extra_buttons=[CANCEL_BTN])
+    return ASK_BAN
+
+async def ban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_ban(update.message.chat_id, update.message.message_id, update.message.text.strip(), context)
+    return ConversationHandler.END
+
+async def process_unban(chat_id, msg_id, target_input, context):
+    target_id = None
+    if target_input.startswith('@'):
+        username = target_input.replace('@', '').lower()
+        if username in user_mapping: target_id = user_mapping[username]
+    elif target_input.isdigit(): target_id = int(target_input)
+        
+    if target_id and target_id in banned_users:
+        banned_users.remove(target_id)
+        await send_custom_msg(chat_id, f"✅ تم فك الحظر بنجاح.", msg_id)
+    else:
+        await send_custom_msg(chat_id, f"المستخدم غير محظور أو لم يتم العثور عليه. {WARN_EMOJI}", msg_id)
+
+async def unban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMIN_IDS: return ConversationHandler.END
+    if update.message.reply_to_message:
+        target_id = update.message.reply_to_message.from_user.id
+        if target_id in banned_users:
+            banned_users.remove(target_id)
+            await send_custom_msg(update.message.chat_id, f"✅ تم فك الحظر بنجاح.", update.message.message_id)
+        else:
+            await send_custom_msg(update.message.chat_id, f"المستخدم غير محظور. {WARN_EMOJI}", update.message.message_id)
+        return ConversationHandler.END
+    
+    parts = update.message.text.split()
+    if len(parts) > 1:
+        await process_unban(update.message.chat_id, update.message.message_id, parts[1], context)
+        return ConversationHandler.END
+
+    await send_custom_msg(update.message.chat_id, "ارسل ايدي او يوزر الشخص لفك الحظر عنه:", update.message.message_id, extra_buttons=[CANCEL_BTN])
+    return ASK_UNBAN
+
+async def unban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_unban(update.message.chat_id, update.message.message_id, update.message.text.strip(), context)
+    return ConversationHandler.END
+
+
+# ==========================================
 # إدارة قاعدة بيانات Tonnel
 # ==========================================
 def load_market_db():
@@ -794,6 +874,9 @@ def generate_conversion_msg(amount, currency_str):
     msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
     return msg
 
+# ==========================================
+# نظام التنبيهات (العملات وصيد الهدايا)
+# ==========================================
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     msg = f"{WHALE_BELL} <b>نظام التنبيهات الذكي</b>\n\nاختر نوع التنبيه الذي تريده:"
@@ -906,10 +989,8 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     msg = f"{WHALE_BELL} <b>تنبيهاتك الحالية:</b>\n\n"
-    
     if is_gift_sniper:
         msg += f"🎯 <b>صيد الهدايا:</b> مفعل (يراقب نزول الأسعار)\n\n"
-        
     if user_alerts:
         msg += f"📊 <b>العملات:</b>\n"
         for idx, a in enumerate(user_alerts, 1):
@@ -1134,7 +1215,6 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
 
     exact_name = resolve_gift_name_mrkt(raw_query)
     
-    # إرسال كل أشكال الفوارز لتجنب مشاكل البحث
     collections_list = [exact_name, exact_name.replace("’", "'"), exact_name.replace("'", "’")] if exact_name else []
     collections_list = list(set(collections_list)) 
     
@@ -1335,19 +1415,22 @@ def main():
             ASK_GIFT_SEARCH_TONNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), perform_gift_search_tonnel)],
             ASK_GIFT_SEARCH_MRKT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), perform_gift_search_mrkt)]
         },
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True
     )
     
     ban_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("ban", ban_start), MessageHandler(filters.Regex(r'^/?حظر$'), ban_start)],
         states={ASK_BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), ban_receive)]},
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True
     )
     
     unban_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("unban", unban_start), MessageHandler(filters.Regex(r'^/?الغاء حظر$|/?الغاء الحظر$'), unban_start)],
         states={ASK_UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), unban_receive)]},
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True
     )
     
     app.add_handler(alert_conv_handler)
