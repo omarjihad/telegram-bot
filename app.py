@@ -69,7 +69,7 @@ crypto_24h_trend = {'BTC': 0.0, 'GRAM': 0.0, 'BATH': 0.0}
 daily_iqd = {'date': '', 'open_price': 0} 
 
 alerts_db = []
-gift_alert_users = set() 
+gift_alert_users = {} # تحول لقاموس لدعم المجموعات والمنشن
 notified_mrkt_gifts = set() 
 user_wallets = {} 
 bot_users = set() 
@@ -191,14 +191,22 @@ async def trigger_gift_alert(gift_name, floor, drop_price, gift_id, market, gift
     
     btn.append([{"text": "عرض في تيليجرام", "url": url_telegram, "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}])
     
-    msg = (f"🔥 <b>صيد هدايا جديد! (خصم 6% أو أكثر)</b> 🔥\n\n"
-           f"🎁 الهدية: <b>{gift_name}</b>\n"
-           f"📉 السعر المعروض: <b>{format_exact_price(drop_price)}</b> {GRAM_EMOJI}\n"
-           f"📊 الفلور الحالي: <b>{format_exact_price(floor)}</b> {GRAM_EMOJI}\n"
-           f"🛒 السوق: <b>{market}</b>")
-           
-    for uid in list(gift_alert_users):
-        await send_custom_msg(uid, msg, extra_buttons=btn, skip_news=True)
+    # دعم المجموعات بالمنشن 
+    grouped_by_chat = {}
+    for uid, udata in gift_alert_users.items():
+        cid = udata['chat_id']
+        if cid not in grouped_by_chat: grouped_by_chat[cid] = []
+        grouped_by_chat[cid].append({'id': uid, 'name': udata['name']})
+        
+    for cid, users in grouped_by_chat.items():
+        mentions = " ".join([f"<a href='tg://user?id={u['id']}'>{u['name']}</a>" for u in users])
+        msg = (f"يا : {mentions} {WHALE_BELL}\n\n"
+               f"🔥 <b>صيد هدايا جديد! (خصم 6% أو أكثر)</b> 🔥\n\n"
+               f"🎁 الهدية: <b>{gift_name}</b>\n"
+               f"📉 السعر المعروض: <b>{format_exact_price(drop_price)}</b> {GRAM_EMOJI}\n"
+               f"📊 الفلور الحالي: <b>{format_exact_price(floor)}</b> {GRAM_EMOJI}\n"
+               f"🛒 السوق: <b>{market}</b>")
+        await send_custom_msg(cid, msg, extra_buttons=btn, skip_news=True)
 
 # ==========================================
 # MRKT API Functions
@@ -260,7 +268,7 @@ async def mrkt_updater_loop():
                         if price:
                             ton_price = price / 1_000_000_000
                             mrkt_floor['price'] = format_exact_price(ton_price)
-                            mrkt_floor['name'] = cheapest.get("title") or cheapest.get("collectionName") or "Unknown"
+                            mrkt_floor['name'] = cheapest.get("collectionName") or cheapest.get("title") or "Unknown"
                             gift_id = cheapest.get("id")
                             mrkt_floor['url_mrkt'] = f"https://t.me/mrkt/app?startapp={gift_id}"
                             
@@ -270,7 +278,7 @@ async def mrkt_updater_loop():
 
                 # 2. فحص الهدايا الحديثة جداً لنظام صيد الهدايا (خصم 6%)
                 if gift_alert_users:
-                    json_recent = get_mrkt_payload([], cursor="", ordering=None)
+                    json_recent = get_mrkt_payload([], cursor="", ordering=None) # يجلب الهدايا الأحدث نزولاً للسوق
                     r_rec = await mrkt_http.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_recent)
                     if r_rec.status_code == 200:
                         recent_gifts = r_rec.json().get('gifts', [])
@@ -281,15 +289,22 @@ async def mrkt_updater_loop():
                             price_val = next((g.get(k) for k in ["salePrice", "salePriceWithoutFee"] if isinstance(g.get(k), (int, float)) and g.get(k) > 0), None)
                             if price_val:
                                 ton_price = price_val / 1e9
-                                gift_name = g.get("title") or g.get("collectionName") or "Unknown"
+                                # تجاهل الموديل (Model/Backdrop) والاعتماد على collectionName فقط
+                                gift_name = g.get("collectionName") or g.get("title") or "Unknown"
                                 
-                                known_prices = [d['price'] for d in active_listings.values() if d['name'] == gift_name and d['price'] > 0]
-                                if known_prices:
-                                    current_floor = min(known_prices)
-                                    if ton_price <= (current_floor * 0.94):
-                                        notified_mrkt_gifts.add(g_id)
-                                        if len(notified_mrkt_gifts) > 5000: notified_mrkt_gifts.clear()
-                                        asyncio.create_task(trigger_gift_alert(gift_name, current_floor, ton_price, g_id, "MRKT", g.get("number")))
+                                # جلب الفلور الأساسي من استجابة MRKT نفسها
+                                mrkt_floor_nano = g.get("floorPriceNanoTONsByCollection")
+                                if mrkt_floor_nano and mrkt_floor_nano > 0:
+                                    current_floor = mrkt_floor_nano / 1e9
+                                else:
+                                    # بحال لم يرفق MRKT الفلور، يبحث في بيانات تونيل كخطة بديلة
+                                    known_prices = [d['price'] for d in active_listings.values() if d['name'].lower() == gift_name.lower() and d['price'] > 0]
+                                    current_floor = min(known_prices) if known_prices else 0
+                                    
+                                if current_floor > 0 and ton_price <= (current_floor * 0.94):
+                                    notified_mrkt_gifts.add(g_id)
+                                    if len(notified_mrkt_gifts) > 5000: notified_mrkt_gifts.clear()
+                                    asyncio.create_task(trigger_gift_alert(gift_name, current_floor, ton_price, g_id, "MRKT", g.get("number")))
         except Exception: pass
         await asyncio.sleep(15)
 
@@ -401,9 +416,11 @@ async def process_event(event, is_live=False):
 
     if ev_type in ["listing.created", "premarket.listing_created", "listing.price_changed"]:
         if ev_data.get('asset') == 'TON':
+            # نأخذ اسم الهدية الأساسي بدون نماذج حسب دوكس Tonnel[span_1](start_span)[span_1](end_span)
             gift_name = gift_info.get('gift_name', 'Unknown')
             price = float(ev_data.get('price', 0))
             
+            # فحص الصيد (Sniper) بخصم 6% للأحداث المباشرة فقط لمنع الـ Spam
             if is_live and price > 0 and gift_alert_users:
                 known_prices = [d['price'] for d in active_listings.values() if d['name'] == gift_name and d['price'] > 0]
                 if known_prices:
@@ -464,413 +481,8 @@ async def tonnel_websocket_loop():
             await asyncio.sleep(2)
 
 # ==========================================
-# نظام الريسيت المتطور
+# نظام التنبيهات (العملات وصيد الهدايا)
 # ==========================================
-async def reset_market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id not in ADMIN_IDS: return
-    msg = "اختر السوق الذي تريد عمل تفريغ (Reset) له:"
-    btn = [
-        [{"text": "مركت (MRKT)", "callback_data": "reset_mrkt", "style": "primary", "icon_custom_emoji_id": MRKT_ICON_ID}],
-        [{"text": "تونيل (Tonnel)", "callback_data": "reset_tonnel", "style": "success", "icon_custom_emoji_id": TONNEL_ICON_ID}],
-        [{"text": "تفريغ الاثنين", "callback_data": "reset_both", "style": "danger"}],
-        CANCEL_BTN
-    ]
-    await send_custom_msg(update.message.chat_id, msg, skip_news=True, extra_buttons=btn)
-
-async def handle_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("ليس لديك صلاحية!", show_alert=True)
-        return
-    
-    await query.answer("جاري التفريغ... ⏳")
-    data = query.data
-    chat_id = query.message.chat.id
-    msg_id = query.message.message_id
-    
-    global active_listings, last_event_id, needs_db_save, mrkt_token, mrkt_floor
-    
-    if data == "reset_tonnel" or data == "reset_both":
-        active_listings.clear()
-        last_event_id = ""
-        save_market_db()
-        await replay_events()
-        needs_db_save = True
-        
-    if data == "reset_mrkt" or data == "reset_both":
-        mrkt_token = None 
-        mrkt_floor['price'] = "0"
-        mrkt_floor['name'] = "جاري التحديث..."
-        
-    txt = "✅ تم تفريغ السوق وجلب البيانات الجديدة بنجاح."
-    await edit_custom_msg(chat_id, msg_id, txt, skip_news=True)
-
-async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
-    if user.id not in bot_users: bot_users.add(user.id)
-    if user.username: user_mapping[user.username.lower()] = user.id
-
-async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    result = update.my_chat_member
-    if result.new_chat_member.status in ["member", "administrator"] and result.old_chat_member.status not in ["member", "administrator"]:
-        chat = result.chat
-        msg = f"تم تشغيل البوت اكتب الاوامر او اوامر لعرض الشرح {HELLO_EMOJI}"
-        try: await send_custom_msg(chat.id, msg)
-        except: pass
-
-async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if not update.effective_user: return False
-    user_id = update.effective_user.id
-    if user_id in banned_users:
-        msg = update.message
-        if not msg or not msg.text: return True
-        chat_type = msg.chat.type
-        text = msg.text.lower()
-        trigger_warning = False
-        if chat_type == 'private': trigger_warning = True
-        elif text.startswith('/'): trigger_warning = True
-        elif msg.reply_to_message and context.bot.id == msg.reply_to_message.from_user.id: trigger_warning = True
-        elif context.bot.username and context.bot.username.lower() in text: trigger_warning = True
-        else:
-            if any(kw in text for kw in ["الاوامر", "اوامر", "فلور الهدايا", "فلور", "هدايا", "رصيدي", "تغيير محفظتي", "تفعيل التنبيهات", "بحث", "صرف", "سعر", "نبهني"]): trigger_warning = True
-
-        if trigger_warning:
-            warning_msg = 'دروح عمو روح خل واحد من المطورين يفك الحظر منك عود تعال <tg-emoji emoji-id="5872697861166075790">🚫</tg-emoji>'
-            btn = [[{"text": "الروسي", "url": "https://t.me/M6M9N", "style": "success", "icon_custom_emoji_id": "5372930329822659547"}], [{"text": "ساسكي", "url": "https://t.me/O1916", "style": "danger", "icon_custom_emoji_id": "5258021357446268553"}]]
-            url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-            inline_keyboard = [btn[0], btn[1], [{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "primary", "icon_custom_emoji_id": "5224257782013769471"}]]
-            payload = {"chat_id": msg.chat_id, "text": warning_msg, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}}
-            if msg.message_id: payload["reply_parameters"] = {"message_id": msg.message_id}
-            async with aiohttp.ClientSession() as session:
-                try: await session.post(url, json=payload)
-                except: pass
-        return True 
-    return False
-
-async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query:
-        await update.callback_query.answer()
-        chat_id = update.callback_query.message.chat.id
-        msg_id = update.callback_query.message.message_id
-        await edit_custom_msg(chat_id, msg_id, f"تم الإلغاء بنجاح. {SUCCESS_EMOJI}")
-    else:
-        chat_id = update.message.chat_id
-        msg_id = update.message.message_id
-        await send_custom_msg(chat_id, f"تم الإلغاء بنجاح. {SUCCESS_EMOJI}", msg_id)
-    return ConversationHandler.END
-
-# ==========================================
-# نظام الحظر وإلغاء الحظر
-# ==========================================
-async def process_ban(chat_id, msg_id, target_input, context):
-    target_id, target_name = None, target_input
-    if target_input.startswith('@'):
-        username = target_input.replace('@', '').lower()
-        if username in user_mapping: target_id = user_mapping[username]
-    elif target_input.isdigit(): target_id = int(target_input)
-        
-    if target_id:
-        if target_id in ADMIN_IDS:
-            await send_custom_msg(chat_id, f"عذراً، لا يمكنك حظر المطورين! {WARN_EMOJI}", msg_id)
-        else:
-            banned_users.add(target_id)
-            await send_custom_msg(chat_id, f"✅ تم حظر {target_name} بنجاح.", msg_id)
-    else:
-        await send_custom_msg(chat_id, f"عذراً، لم أتمكن من العثور على هذا المستخدم في سجلاتي. {WARN_EMOJI}", msg_id)
-
-async def ban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id not in ADMIN_IDS: return ConversationHandler.END
-    if update.message.reply_to_message:
-        target_id = update.message.reply_to_message.from_user.id
-        target_name = update.message.reply_to_message.from_user.first_name
-        if target_id in ADMIN_IDS:
-            await send_custom_msg(update.message.chat_id, f"عذراً، لا يمكنك حظر المطورين! {WARN_EMOJI}", update.message.message_id)
-        else:
-            banned_users.add(target_id)
-            await send_custom_msg(update.message.chat_id, f"✅ تم حظر {target_name} بنجاح.", update.message.message_id)
-        return ConversationHandler.END
-    
-    parts = update.message.text.split()
-    if len(parts) > 1:
-        await process_ban(update.message.chat_id, update.message.message_id, parts[1], context)
-        return ConversationHandler.END
-
-    await send_custom_msg(update.message.chat_id, "ارسل ايدي او يوزر الشخص لحظره:", update.message.message_id, extra_buttons=[CANCEL_BTN])
-    return ASK_BAN
-
-async def ban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await process_ban(update.message.chat_id, update.message.message_id, update.message.text.strip(), context)
-    return ConversationHandler.END
-
-async def process_unban(chat_id, msg_id, target_input, context):
-    target_id = None
-    if target_input.startswith('@'):
-        username = target_input.replace('@', '').lower()
-        if username in user_mapping: target_id = user_mapping[username]
-    elif target_input.isdigit(): target_id = int(target_input)
-        
-    if target_id and target_id in banned_users:
-        banned_users.remove(target_id)
-        await send_custom_msg(chat_id, f"✅ تم فك الحظر بنجاح.", msg_id)
-    else:
-        await send_custom_msg(chat_id, f"المستخدم غير محظور أو لم يتم العثور عليه. {WARN_EMOJI}", msg_id)
-
-async def unban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id not in ADMIN_IDS: return ConversationHandler.END
-    if update.message.reply_to_message:
-        target_id = update.message.reply_to_message.from_user.id
-        if target_id in banned_users:
-            banned_users.remove(target_id)
-            await send_custom_msg(update.message.chat_id, f"✅ تم فك الحظر بنجاح.", update.message.message_id)
-        else:
-            await send_custom_msg(update.message.chat_id, f"المستخدم غير محظور. {WARN_EMOJI}", update.message.message_id)
-        return ConversationHandler.END
-    
-    parts = update.message.text.split()
-    if len(parts) > 1:
-        await process_unban(update.message.chat_id, update.message.message_id, parts[1], context)
-        return ConversationHandler.END
-
-    await send_custom_msg(update.message.chat_id, "ارسل ايدي او يوزر الشخص لفك الحظر عنه:", update.message.message_id, extra_buttons=[CANCEL_BTN])
-    return ASK_UNBAN
-
-async def unban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await process_unban(update.message.chat_id, update.message.message_id, update.message.text.strip(), context)
-    return ConversationHandler.END
-
-# ==========================================
-# API فحص المحفظة
-# ==========================================
-async def check_ton_wallet(address):
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://tonapi.io/v2/accounts/{address}"
-            async with session.get(url, timeout=5) as resp:
-                if resp.status != 200: return False, 0, 0
-                data = await resp.json()
-                ton_balance = data.get('balance', 0) / 1e9 
-
-            usdt_url = f"https://tonapi.io/v2/accounts/{address}/jettons"
-            usdt_balance = 0
-            async with session.get(usdt_url, timeout=5) as resp:
-                if resp.status == 200:
-                    j_data = await resp.json()
-                    for b in j_data.get('balances', []):
-                        if b['jetton']['symbol'] in ['USD₮', 'USDT']:
-                            decimals = b['jetton']['decimals']
-                            usdt_balance = float(b['balance']) / (10**decimals)
-                            break
-            return True, ton_balance, usdt_balance
-    except Exception: return False, 0, 0
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await track_new_user(update.effective_user, context)
-    if await is_user_banned(update, context): return ConversationHandler.END
-    text = update.message.text
-    user = update.message.from_user
-    chat_id = update.message.chat_id
-    safe_name = html.escape(user.first_name)
-    
-    add_bot_url = f"https://t.me/{context.bot.username}?startgroup=true&admin=change_info,delete_messages,restrict_members,invite_users,pin_messages,manage_chat"
-    
-    if 'link_wallet' in text or 'change_wallet' in text:
-        if 'link_wallet' in text and user.id in user_wallets:
-            msg = f"لديك محفضه مربوطه بالفعل\nلتغيير محفضتك اضغط على الزر ادناه {DOWN_EMOJI} :"
-            btn = [[{"text": "ربط محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]]
-            await send_custom_msg(chat_id, msg, extra_buttons=btn)
-            return ConversationHandler.END
-        else:
-            msg = f"اهلا بك {safe_name} {CROWN_EMOJI}\n\nقم بارسال عنوان محفضتك \nاو الادرس الخاص بك لربط محفضتك {PLANE_EMOJI}"
-            await send_custom_msg(chat_id, msg, extra_buttons=[CANCEL_BTN])
-            return ASK_WALLET
-    else:
-        msg = (f"أهلاً بك في البوت يا {safe_name}! {HELLO_EMOJI}\n\n"
-               f"هذا البوت يقدم خدمات الصرافة والتنبيهات الذكية وحفظ المعلومات.\n"
-               f"اكتب <b>الاوامر</b> او <b>اوامر</b> لعرض جميع خدمات البوت.")
-        btn = [[{"text": "اضافه البوت الى مجموعتي", "url": add_bot_url, "style": "primary"}]]
-        await send_custom_msg(chat_id, msg, extra_buttons=btn)
-        return ConversationHandler.END
-
-async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await is_user_banned(update, context): return ConversationHandler.END
-    address = html.escape(update.message.text.strip())
-    chat_id = update.message.chat_id
-    user_id = update.message.from_user.id
-    
-    msg_id = await send_custom_msg(chat_id, f"يتم البحث عن محفضتك... {SEARCH_EMOJI}")
-    is_valid, _, _ = await check_ton_wallet(address)
-    
-    if is_valid:
-        await asyncio.sleep(1.5)
-        await edit_custom_msg(chat_id, msg_id, f"جاري ربط المحفضه بالبوت... {WAIT_EMOJI}")
-        await asyncio.sleep(1.5)
-        user_wallets[user_id] = address
-        await edit_custom_msg(chat_id, msg_id, f"تم ربط محفضتك بنجاح  . {SUCCESS_EMOJI}")
-    else:
-        await asyncio.sleep(1.5)
-        await edit_custom_msg(chat_id, msg_id, f"عنوان المحفضه خطا ! {FAIL_EMOJI}")
-    return ConversationHandler.END
-
-def normalize_currency(curr_str):
-    curr = curr_str.lower().strip()
-    if curr in ['دولار', 'usdt', 'usd']: return 'USD'
-    elif curr in ['ماستر', 'master']: return 'IQD'
-    elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: return 'STARS'
-    elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: return 'TON' 
-    elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: return 'BTC'
-    elif curr in ['اسيا', 'آسيا', 'asia']: return 'ASIA'
-    elif curr in ['باث', 'bath']: return 'BATH'
-    return None
-
-def get_current_price(curr_code):
-    if curr_code == 'USD': return 1.0
-    elif curr_code == 'IQD': return last_known_iqd
-    elif curr_code == 'STARS': return 0.015
-    elif curr_code in crypto_prices: return crypto_prices[curr_code]
-    return 0
-
-def get_daily_trend_emoji(currency, current_price=None):
-    if currency in ['BTC', 'TON', 'BATH']:
-        change = crypto_24h_trend.get(currency, 0.0)
-        if change > 0: return UP_EMOJI
-        elif change < 0: return DOWN_EMOJI
-        return ""
-    elif currency == 'IQD':
-        open_price = daily_iqd['open_price']
-        if open_price == 0 or current_price == open_price: return ""
-        if current_price > open_price: return UP_EMOJI
-        elif current_price < open_price: return DOWN_EMOJI
-        return ""
-    return ""
-
-async def fetch_mastercard_price(session):
-    try:
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-        headers = {"Content-Type": "application/json"}
-        payload = {"fiat": "IQD", "page": 1, "rows": 1, "tradeType": "SELL", "asset": "USDT", "countries": [], "payTypes": [], "publisherType": None, "merchantCheck": False}
-        async with session.post(url, json=payload, headers=headers, timeout=5) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get('data') and len(data['data']) > 0:
-                    price_str = data['data'][0]['adv']['price']
-                    price_float = float(price_str)
-                    if price_float < 2000: price_float = price_float * 100
-                    return int(price_float)
-    except Exception: pass
-    return None
-
-async def update_prices_if_needed():
-    global last_fetch_time, cached_msg, last_known_iqd, crypto_prices, crypto_24h_trend, daily_iqd
-    current_time = time.time()
-    
-    if current_time - last_fetch_time < CACHE_TIME and cached_msg: return True
-        
-    try:
-        async with aiohttp.ClientSession() as session:
-            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","GRAMUSDT"]'
-            crypto_task = session.get(crypto_url, timeout=6)
-            master_task = fetch_mastercard_price(session)
-            
-            response, fetched_iqd = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
-            
-            if not isinstance(response, Exception) and response.status == 200:
-                crypto_data = await response.json()
-                for item in crypto_data:
-                    symbol = item['symbol']
-                    if symbol == 'BTCUSDT':
-                        crypto_prices['BTC'] = float(item['lastPrice'])
-                        crypto_24h_trend['BTC'] = float(item['priceChangePercent'])
-                    elif symbol == 'GRAMUSDT':
-                        crypto_prices['TON'] = float(item['lastPrice'])
-                        crypto_24h_trend['TON'] = float(item['priceChangePercent'])
-
-            try:
-                bath_url = 'https://api.binance.com/api/v3/ticker/24hr?symbol=BATHUSDT'
-                async with session.get(bath_url, timeout=3) as bath_resp:
-                    if bath_resp.status == 200:
-                        bath_data = await bath_resp.json()
-                        crypto_prices['BATH'] = float(bath_data['lastPrice'])
-                        crypto_24h_trend['BATH'] = float(bath_data['priceChangePercent'])
-                    else: crypto_prices['BATH'] = 0.03
-            except: crypto_prices['BATH'] = 0.03
-
-            if isinstance(fetched_iqd, int) and fetched_iqd > 0: last_known_iqd = fetched_iqd
-                
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            if daily_iqd['date'] != today_str:
-                daily_iqd['date'] = today_str
-                daily_iqd['open_price'] = last_known_iqd
-
-            btc_int = int(crypto_prices.get('BTC', 0))
-            ton_val = crypto_prices.get('TON', 0)
-            bath_val = crypto_prices.get('BATH', 0.03)
-            
-            btc_trend = get_daily_trend_emoji('BTC')
-            ton_trend = get_daily_trend_emoji('TON')
-            bath_trend = get_daily_trend_emoji('BATH')
-            iqd_trend = get_daily_trend_emoji('IQD', last_known_iqd)
-            asia_price_for_100_usd = int(last_known_iqd / 0.9)
-
-            msg = (f'<tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji> نشرة الأسعار المباشرة <tg-emoji emoji-id="5197504520921326761">⭐</tg-emoji>\n\n'
-                   f'{GIFT_FLOOR_EMOJI} فلور الهدايا (تونيل): <b>{gift_floor["price"]}</b> {GRAM_EMOJI}\n'
-                   f'{MRKT_TEXT_EMOJI} فلور الهدايا (مركت): <b>{mrkt_floor["price"]}</b> {GRAM_EMOJI}\n'
-                   "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-                   f'{MASTER_EMOJI} الدولار (100$): <b>{last_known_iqd:,}</b> IQD {iqd_trend}\n'
-                   f'{ASIA_EMOJI} اسيا (100$): <b>{asia_price_for_100_usd:,}</b> دينار\n'
-                   "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-                   f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> Bitcoin: <b>${btc_int:,}</b> {btc_trend}\n'
-                   f'{GRAM_EMOJI} GRAM: <b>${ton_val:,.2f}</b> {ton_trend}\n'
-                   f'{BATH_EMOJI} BATH: <b>${bath_val:,.4f}</b> {bath_trend}\n'
-                   "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-                   f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <i>يتم التحديث من الأسواق العالمية والمحلية</i>\n'
-                   f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>')
-            cached_msg = msg
-            last_fetch_time = current_time
-            return True
-    except Exception: return False
-
-def generate_conversion_msg(amount, currency_str):
-    curr = currency_str.lower()
-    show_usd, show_iqd = True, True
-
-    if curr in ['دولار', 'usdt', 'usd']: base, name, usd_val, show_usd = 'USD', "دولار (USDT)", amount, False  
-    elif curr in ['ماستر', 'master']:
-        base, name = 'IQD', f"{MASTER_EMOJI} ماستر"
-        actual_iqd = amount * 1000 if amount < 100000 else amount
-        usd_val = actual_iqd / (last_known_iqd / 100)
-        show_iqd = False  
-    elif curr in ['اسيا', 'asia', 'آسيا']:
-        base, name = 'ASIA', f"{ASIA_EMOJI} اسيا"
-        actual_asia = amount * 1000 if amount < 100000 else amount
-        value_in_master = actual_asia * 0.9
-        usd_val = value_in_master / (last_known_iqd / 100)
-    elif curr in ['باث', 'bath']: base, name, usd_val = 'BATH', f"{BATH_EMOJI} باث (BATH)", amount * crypto_prices.get('BATH', 0.03)
-    elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: base, name, usd_val = 'STARS', '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم', amount * 0.015 
-    elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: base, name, usd_val = 'TON', "جرام (GRAM)", amount * crypto_prices.get('TON', 0)
-    elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: base, name, usd_val = 'BTC', "بتكوين (BTC)", amount * crypto_prices.get('BTC', 0)
-    else: return f"عذراً، العملة غير مدعومة. {WARN_EMOJI}"
-
-    if usd_val == 0: return f"عذراً، لا يمكن حساب القيمة الآن. {WARN_EMOJI}"
-
-    iqd_val = (usd_val * last_known_iqd) / 100
-    asia_val = iqd_val / 0.9 
-    ton_val = usd_val / crypto_prices['TON'] if crypto_prices.get('TON') else 0
-    bath_val = usd_val / crypto_prices.get('BATH', 0.03)
-    stars_val = usd_val / 0.015 
-    btc_val = usd_val / crypto_prices['BTC'] if crypto_prices.get('BTC') else 0
-
-    msg = f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>تصريف {amount:g} {name}:</b>\n\n'
-    if show_usd: msg += f'{USDT_CASH} بالدولار: <b>${usd_val:,.3f}</b>\n'
-    if show_iqd: msg += f'{MASTER_EMOJI} بالماستر: <b>{iqd_val:,.0f}</b> IQD\n'
-    if base != 'ASIA': msg += f'{ASIA_EMOJI} بالاسيا: <b>{asia_val:,.0f}</b> دينار\n'
-    msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-    if base != 'TON' and ton_val > 0: msg += f'{GRAM_EMOJI} جرام: <b>{ton_val:,.2f}</b> GRAM\n'
-    if base != 'BATH' and bath_val > 0: msg += f'{BATH_EMOJI} باث: <b>{bath_val:,.0f}</b> BATH\n'
-    if base != 'STARS' and stars_val > 0: msg += f'<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم: <b>{stars_val:,.0f}</b> Stars\n'
-    if base != 'STARS' and base != 'BTC' and btc_val > 0: msg += f'<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji> بتكوين: <b>{btc_val:,.6f}</b> BTC\n'
-    msg += "╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n"
-    msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
-    return msg
-
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     msg = f"{WHALE_BELL} <b>نظام التنبيهات الذكي</b>\n\nاختر نوع التنبيه الذي تريده:"
@@ -894,11 +506,26 @@ async def alert_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data == "alert_gifts_toggle":
         user_id = query.from_user.id
         if user_id in gift_alert_users:
-            gift_alert_users.remove(user_id)
-            await edit_custom_msg(query.message.chat.id, query.message.message_id, f"تم إلغاء تفعيل تنبيهات صيد الهدايا {SUCCESS_EMOJI}", skip_news=True)
+            msg = f"أنت مفعل تنبيهات صيد الهدايا بالفعل! 🎯\nهل تريد إيقافها؟"
+            btn = [
+                [{"text": "إيقاف صيد الهدايا", "callback_data": "stop_gift_alerts", "style": "danger", "icon_custom_emoji_id": "5215204871422093648"}],
+                CANCEL_BTN
+            ]
+            await edit_custom_msg(query.message.chat.id, query.message.message_id, msg, extra_buttons=btn, skip_news=True)
+            return ASK_ALERT_TYPE
         else:
-            gift_alert_users.add(user_id)
+            gift_alert_users[user_id] = {
+                "name": html.escape(query.from_user.first_name),
+                "chat_id": query.message.chat.id
+            }
             await edit_custom_msg(query.message.chat.id, query.message.message_id, f"✅ <b>تم تسجيلك في صيد الهدايا!</b>\n\nسيقوم البوت بمراقبة سوقي (تونيل ومركت) وإشعارك فور نزول هدية أرخص من الفلور بنسبة 6% أو أكثر.", skip_news=True)
+        return ConversationHandler.END
+        
+    elif data == "stop_gift_alerts":
+        user_id = query.from_user.id
+        if user_id in gift_alert_users:
+            del gift_alert_users[user_id]
+        await edit_custom_msg(query.message.chat.id, query.message.message_id, f"تم إلغاء تفعيل تنبيهات صيد الهدايا بنجاح {SUCCESS_EMOJI}", skip_news=True)
         return ConversationHandler.END
 
 async def alert_currency_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -961,7 +588,7 @@ async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     removed_sniper = False
     if user_id in gift_alert_users:
-        gift_alert_users.remove(user_id)
+        del gift_alert_users[user_id]
         removed_sniper = True
         
     if len(alerts_db) < initial_len or removed_sniper:
@@ -1092,22 +719,51 @@ async def post_init(app: Application):
     asyncio.create_task(floor_updater_loop())
     asyncio.create_task(mrkt_updater_loop())
 
-def resolve_gift_name_mrkt(search_term):
-    if not search_term: return ""
-    s = search_term.lower().replace("'", "").replace("’", "").replace("-", " ").strip()
-    if s in ALIASES: return ALIASES[s]
-    for known in KNOWN_GIFTS:
-        k = known.lower().replace("'", "").replace("’", "").replace("-", " ")
-        if s == k: return known
-    search_words = s.split()
-    for known in KNOWN_GIFTS:
-        k = known.lower().replace("'", "").replace("’", "").replace("-", " ")
-        if all(word in k for word in search_words): return known
-    for known in KNOWN_GIFTS:
-        k = known.lower().replace("'", "").replace("’", "").replace("-", " ")
-        if s in k: return known
-    return search_term.title()
+# ==========================================
+# نظام الريسيت المتطور
+# ==========================================
+async def reset_market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMIN_IDS: return
+    msg = "اختر السوق الذي تريد عمل تفريغ (Reset) له:"
+    btn = [
+        [{"text": "مركت (MRKT)", "callback_data": "reset_mrkt", "style": "primary", "icon_custom_emoji_id": MRKT_ICON_ID}],
+        [{"text": "تونيل (Tonnel)", "callback_data": "reset_tonnel", "style": "success", "icon_custom_emoji_id": TONNEL_ICON_ID}],
+        [{"text": "تفريغ الاثنين", "callback_data": "reset_both", "style": "danger"}],
+        CANCEL_BTN
+    ]
+    await send_custom_msg(update.message.chat_id, msg, skip_news=True, extra_buttons=btn)
 
+async def handle_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("ليس لديك صلاحية!", show_alert=True)
+        return
+    
+    await query.answer("جاري التفريغ... ⏳")
+    data = query.data
+    chat_id = query.message.chat.id
+    msg_id = query.message.message_id
+    
+    global active_listings, last_event_id, needs_db_save, mrkt_token, mrkt_floor
+    
+    if data == "reset_tonnel" or data == "reset_both":
+        active_listings.clear()
+        last_event_id = ""
+        save_market_db()
+        await replay_events()
+        needs_db_save = True
+        
+    if data == "reset_mrkt" or data == "reset_both":
+        mrkt_token = None 
+        mrkt_floor['price'] = "0"
+        mrkt_floor['name'] = "جاري التحديث..."
+        
+    txt = "✅ تم تفريغ السوق وجلب البيانات الجديدة بنجاح."
+    await edit_custom_msg(chat_id, msg_id, txt, skip_news=True)
+
+# ==========================================
+# نظام بحث الهدايا الدقيق
+# ==========================================
 async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     msg = f"{SEARCH_EMOJI} <b>بحث عن هدية</b>\n\nاختر السوق الذي تريد البحث فيه:"
@@ -1208,7 +864,6 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
 
     exact_name = resolve_gift_name_mrkt(raw_query)
-    
     collections_list = [exact_name, exact_name.replace("’", "'"), exact_name.replace("'", "’")] if exact_name else []
     collections_list = list(set(collections_list)) 
     
@@ -1252,7 +907,7 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
         
         if price:
             ton_price = price / 1_000_000_000
-            gift_name = found_gift.get("title") or found_gift.get("collectionTitle") or found_gift.get("collectionName") or "Unknown"
+            gift_name = found_gift.get("collectionName") or found_gift.get("title") or "Unknown"
             gift_id = found_gift.get("id")
             
             btn = []
@@ -1272,6 +927,21 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
 
     await edit_custom_msg(chat_id, msg_wait, f"عذراً، لم أتمكن من العثور على الهدية في مركت. {FAIL_EMOJI}")
     return ConversationHandler.END
+
+# ==========================================
+# معالجة الرسائل العامة
+# ==========================================
+async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
+    if user.id not in bot_users: bot_users.add(user.id)
+    if user.username: user_mapping[user.username.lower()] = user.id
+
+async def chat_member_updated(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = update.my_chat_member
+    if result.new_chat_member.status in ["member", "administrator"] and result.old_chat_member.status not in ["member", "administrator"]:
+        chat = result.chat
+        msg = f"تم تشغيل البوت اكتب الاوامر او اوامر لعرض الشرح {HELLO_EMOJI}"
+        try: await send_custom_msg(chat.id, msg)
+        except: pass
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
@@ -1388,17 +1058,19 @@ def main():
     alert_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^/?نبهني$'), alert_start)],
         states={
-            ASK_ALERT_TYPE: [CallbackQueryHandler(alert_type_callback, pattern="^(alert_currency_start|alert_gifts_toggle)$")],
+            ASK_ALERT_TYPE: [CallbackQueryHandler(alert_type_callback, pattern="^(alert_currency_start|alert_gifts_toggle|stop_gift_alerts)$")],
             ASK_CURRENCY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), alert_currency_name)],
             ASK_CURRENCY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), alert_currency_price)]
         },
-        fallbacks=cancel_handlers + [MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts)]
+        fallbacks=cancel_handlers + [MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts)],
+        per_chat=True, per_user=True, per_message=False
     )
     
     wallet_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={ASK_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), receive_wallet_address)]},
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True, per_message=False
     )
     
     search_conv_handler = ConversationHandler(
@@ -1408,19 +1080,22 @@ def main():
             ASK_GIFT_SEARCH_TONNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), perform_gift_search_tonnel)],
             ASK_GIFT_SEARCH_MRKT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), perform_gift_search_mrkt)]
         },
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True, per_message=False
     )
     
     ban_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("ban", ban_start), MessageHandler(filters.Regex(r'^/?حظر$'), ban_start)],
         states={ASK_BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), ban_receive)]},
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True, per_message=False
     )
     
     unban_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("unban", unban_start), MessageHandler(filters.Regex(r'^/?الغاء حظر$|/?الغاء الحظر$'), unban_start)],
         states={ASK_UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), unban_receive)]},
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True, per_message=False
     )
     
     app.add_handler(alert_conv_handler)
