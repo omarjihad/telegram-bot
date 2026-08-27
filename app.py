@@ -32,6 +32,8 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
+
+# --- قائمة المطورين ---
 ADMIN_IDS = [7126816492, 1955081272]
 DB_FILE = "tonnel_db.json"
 
@@ -69,7 +71,7 @@ crypto_24h_trend = {'BTC': 0.0, 'GRAM': 0.0, 'BATH': 0.0}
 daily_iqd = {'date': '', 'open_price': 0} 
 
 alerts_db = []
-gift_alert_users = {} 
+gift_alert_users = {} # تحول لقاموس لدعم المجموعات والمنشن
 notified_mrkt_gifts = set() 
 user_wallets = {} 
 bot_users = set() 
@@ -80,13 +82,17 @@ user_mapping = {}
 mrkt_http = None
 
 # حالات المحادثة
+ASK_CURRENCY = 1
+ASK_PRICE = 2
 ASK_WALLET = 3 
 ASK_MARKET_CHOICE = 4
 ASK_GIFT_SEARCH_TONNEL = 5
 ASK_GIFT_SEARCH_MRKT = 6
 ASK_BAN = 7
 ASK_UNBAN = 8
-ASK_ALERT_TYPE, ASK_CURRENCY_NAME, ASK_CURRENCY_PRICE = 20, 21, 22
+ASK_ALERT_TYPE = 20
+ASK_CURRENCY_NAME = 21
+ASK_CURRENCY_PRICE = 22
 
 # --- متغيرات السوق وقاعدة البيانات لـ Tonnel ---
 WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
@@ -173,48 +179,7 @@ def format_exact_price(price):
     return f"{float(price):.2f}".rstrip('0').rstrip('.')
 
 # ==========================================
-# دالة إرسال الرسائل وتعديلها
-# ==========================================
-async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None, skip_news=False):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    inline_keyboard = []
-    if extra_buttons: 
-        for btn_group in extra_buttons:
-            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
-            else: inline_keyboard.append([btn_group])
-            
-    if not skip_news:
-        inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
-        
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
-    if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("result", {}).get("message_id")
-        except Exception: pass
-    return None
-
-async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None, skip_news=False):
-    url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
-    inline_keyboard = []
-    if extra_buttons:
-        for btn_group in extra_buttons:
-            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
-            else: inline_keyboard.append([btn_group])
-            
-    if not skip_news:
-        inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
-        
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
-    async with aiohttp.ClientSession() as session:
-        try: await session.post(url, json=payload, timeout=10)
-        except Exception: pass
-
-# ==========================================
-# نظام صيد الهدايا (Sniper - 6% Discount)
+# نظام صيد الهدايا (Sniper - 6% Discount) - لمركت حصراً
 # ==========================================
 async def trigger_gift_alert(gift_name, floor, drop_price, gift_id, market, gift_num):
     if not gift_alert_users: return
@@ -223,13 +188,8 @@ async def trigger_gift_alert(gift_name, floor, drop_price, gift_id, market, gift
     url_telegram = f"https://t.me/nft/{clean_url_name}-{gift_num}" if gift_num else f"https://t.me/nft/{clean_url_name}"
     
     btn = []
-    if market == "Tonnel":
-        url_market = f"https://t.me/tonnel_network_bot/gift?startapp={gift_id}"
-        btn.append([{"text": "شراء من Tonnel", "url": url_market, "style": "success", "icon_custom_emoji_id": TONNEL_ICON_ID}])
-    else:
-        url_market = f"https://t.me/mrkt/app?startapp={gift_id}"
-        btn.append([{"text": "شراء من MRKT", "url": url_market, "style": "success", "icon_custom_emoji_id": MRKT_ICON_ID}])
-    
+    url_market = f"https://t.me/mrkt/app?startapp={gift_id}"
+    btn.append([{"text": "شراء من MRKT", "url": url_market, "style": "success", "icon_custom_emoji_id": MRKT_ICON_ID}])
     btn.append([{"text": "عرض في تيليجرام", "url": url_telegram, "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}])
     
     grouped_by_chat = {}
@@ -252,6 +212,7 @@ async def trigger_gift_alert(gift_name, floor, drop_price, gift_id, market, gift
 # MRKT API Functions
 # ==========================================
 def get_mrkt_payload(collections=None, cursor="", ordering="Price"):
+    # Null instead of "Price" when checking newest gifts
     return {
         "collectionNames": collections or [], "modelNames": [], "backdropNames": [], "symbolNames": [],
         "ordering": ordering, "lowToHigh": True, "maxPrice": None, "minPrice": None,
@@ -293,8 +254,8 @@ async def mrkt_updater_loop():
             if mrkt_token and mrkt_http:
                 headers = make_mrkt_headers(mrkt_token)
                 
-                # 1. تحديث الفلور
-                r = await mrkt_http.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=get_mrkt_payload([], cursor=""))
+                # 1. تحديث الفلور العام لـ MRKT
+                r = await mrkt_http.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=get_mrkt_payload([], cursor="Price"))
                 if r.status_code in [401, 403]:
                     mrkt_token = None 
                     await asyncio.sleep(10)
@@ -316,9 +277,9 @@ async def mrkt_updater_loop():
                             clean_url_name = mrkt_floor['name'].lower().replace(' ', '').replace('’', '').replace("'", "")
                             mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}" if gift_num else f"https://t.me/nft/{clean_url_name}"
 
-                # 2. فحص الهدايا للصيد
+                # 2. فحص الهدايا الحديثة لنظام صيد الهدايا (بخصم 6%) - مركت حصراً
                 if gift_alert_users:
-                    json_recent = get_mrkt_payload([], cursor="", ordering=None) 
+                    json_recent = get_mrkt_payload([], cursor="", ordering=None) # يجلب الهدايا الأحدث نزولاً
                     r_rec = await mrkt_http.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_recent)
                     if r_rec.status_code == 200:
                         recent_gifts = r_rec.json().get('gifts', [])
@@ -331,19 +292,64 @@ async def mrkt_updater_loop():
                                 ton_price = price_val / 1e9
                                 gift_name = g.get("collectionName") or g.get("title") or "Unknown"
                                 
-                                mrkt_floor_nano = g.get("floorPriceNanoTONsByCollection")
-                                if mrkt_floor_nano and mrkt_floor_nano > 0:
-                                    current_floor = mrkt_floor_nano / 1e9
-                                else:
-                                    known_prices = [d['price'] for d in active_listings.values() if d['name'].lower() == gift_name.lower() and d['price'] > 0]
-                                    current_floor = min(known_prices) if known_prices else 0
+                                # تنظيف الاسم للمطابقة الدقيقة 100% مع قاعدة بيانات تونيل
+                                clean_target_name = gift_name.lower().replace(' ', '').replace('’', '').replace("'", "")
+                                
+                                known_prices = []
+                                for item in active_listings.values():
+                                    clean_item_name = item['name'].lower().replace(' ', '').replace('’', '').replace("'", "")
+                                    if clean_item_name == clean_target_name and item['price'] > 0:
+                                        known_prices.append(item['price'])
+                                        
+                                current_floor = min(known_prices) if known_prices else 0
                                     
-                                if current_floor > 0 and ton_price <= (current_floor * 0.94):
+                                if current_floor > 0 and ton_price <= (current_floor * 0.94): # خصم 6%
                                     notified_mrkt_gifts.add(g_id)
                                     if len(notified_mrkt_gifts) > 5000: notified_mrkt_gifts.clear()
                                     asyncio.create_task(trigger_gift_alert(gift_name, current_floor, ton_price, g_id, "MRKT", g.get("number")))
         except Exception: pass
         await asyncio.sleep(15)
+
+# ==========================================
+# دالة إرسال الرسائل وتعديلها
+# ==========================================
+async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None, skip_news=False):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    inline_keyboard = []
+    if extra_buttons: 
+        for btn_group in extra_buttons:
+            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
+            else: inline_keyboard.append([btn_group])
+            
+    if not skip_news:
+        inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
+        
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
+    if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("result", {}).get("message_id")
+        except Exception: pass
+    return None
+
+async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None, skip_news=False):
+    url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+    inline_keyboard = []
+    if extra_buttons:
+        for btn_group in extra_buttons:
+            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
+            else: inline_keyboard.append([btn_group])
+            
+    if not skip_news:
+        inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
+        
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
+    async with aiohttp.ClientSession() as session:
+        try: await session.post(url, json=payload, timeout=10)
+        except Exception: pass
 
 # ==========================================
 # إدارة قاعدة بيانات Tonnel
@@ -394,7 +400,7 @@ async def floor_updater_loop():
                 gift_floor['name'] = "لا توجد هدايا معروضة"
             save_market_db()
 
-async def process_event(event, is_live=False):
+async def process_event(event):
     global active_listings, last_event_id, seen_events, needs_db_save
     
     ev_id = event.get('eventId')
@@ -412,19 +418,10 @@ async def process_event(event, is_live=False):
 
     if ev_type in ["listing.created", "premarket.listing_created", "listing.price_changed"]:
         if ev_data.get('asset') == 'TON':
-            gift_name = gift_info.get('gift_name', 'Unknown')
-            price = float(ev_data.get('price', 0))
-            
-            if is_live and price > 0 and gift_alert_users:
-                known_prices = [d['price'] for d in active_listings.values() if d['name'] == gift_name and d['price'] > 0]
-                if known_prices:
-                    current_floor = min(known_prices)
-                    if price <= (current_floor * 0.94):
-                        asyncio.create_task(trigger_gift_alert(gift_name, current_floor, price, gift_id, "Tonnel", gift_info.get('gift_num')))
-            
+            # تسجيل هدايا تونيل بدون نظام التنبيه هنا بناء على طلبك
             active_listings[gift_id] = {
-                'price': price,
-                'name': gift_name,
+                'price': float(ev_data.get('price', 0)),
+                'name': gift_info.get('gift_name', 'Unknown'),
                 'num': gift_info.get('gift_num', '') 
             }
             needs_db_save = True
@@ -452,7 +449,7 @@ async def replay_events():
                         data = await resp.json()
                         events = data.get('events', [])
                         if not events: break
-                        for ev in events: await process_event(ev, is_live=False)
+                        for ev in events: await process_event(ev)
                         if len(events) < 500: break 
                     else: break
         except Exception: break
@@ -469,7 +466,7 @@ async def tonnel_websocket_loop():
                     try:
                         event = json.loads(message)
                         if event.get('type') == "marketplace.connected": continue
-                        await process_event(event, is_live=True)
+                        await process_event(event)
                     except json.JSONDecodeError: pass
         except Exception: 
             await asyncio.sleep(2)
@@ -529,7 +526,7 @@ async def handle_reset_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await edit_custom_msg(chat_id, msg_id, txt, skip_news=True)
 
 # ==========================================
-# نظام التتبع والحظر
+# نظام التتبع والحظر (Ban System)
 # ==========================================
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in bot_users: bot_users.add(user.id)
@@ -649,7 +646,7 @@ async def unban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ==========================================
-# فحص المحافظ وأوامر البدء
+# API فحص المحفظة
 # ==========================================
 async def check_ton_wallet(address):
     try:
@@ -923,7 +920,7 @@ async def alert_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "name": html.escape(query.from_user.first_name),
                 "chat_id": query.message.chat.id
             }
-            await edit_custom_msg(query.message.chat.id, query.message.message_id, f"✅ <b>تم تسجيلك في صيد الهدايا!</b>\n\nسيقوم البوت بمراقبة سوقي (تونيل ومركت) وإشعارك فور نزول هدية أرخص من الفلور بنسبة 6% أو أكثر.", skip_news=True)
+            await edit_custom_msg(query.message.chat.id, query.message.message_id, f"✅ <b>تم تسجيلك في صيد الهدايا!</b>\n\nسيقوم البوت بمراقبة سوق (مركت) وإشعارك فور نزول هدية أرخص من الفلور بنسبة 6% أو أكثر.", skip_news=True)
         return ConversationHandler.END
         
     elif data == "stop_gift_alerts":
@@ -1016,7 +1013,7 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     msg = f"{WHALE_BELL} <b>تنبيهاتك الحالية:</b>\n\n"
     if is_gift_sniper:
-        msg += f"🎯 <b>صيد الهدايا:</b> مفعل (يراقب نزول الأسعار)\n\n"
+        msg += f"🎯 <b>صيد الهدايا:</b> مفعل (يراقب نزول الأسعار في مركت)\n\n"
     if user_alerts:
         msg += f"📊 <b>العملات:</b>\n"
         for idx, a in enumerate(user_alerts, 1):
@@ -1243,6 +1240,8 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
 
     exact_name = resolve_gift_name_mrkt(raw_query)
+    
+    # إرسال كل أشكال الفوارز لتجنب مشاكل البحث
     collections_list = [exact_name, exact_name.replace("’", "'"), exact_name.replace("'", "’")] if exact_name else []
     collections_list = list(set(collections_list)) 
     
