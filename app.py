@@ -183,7 +183,7 @@ def extract_ton_price_mrkt(g):
     return None
 
 # ==========================================
-# نظام صيد الهدايا (Sniper - 6% Discount) - لمركت حصراً
+# نظام صيد الهدايا (Sniper - 6% Discount)
 # ==========================================
 async def trigger_gift_alert(gift_name, floor, drop_price, gift_id, market, gift_num):
     if not gift_alert_users: return
@@ -213,7 +213,7 @@ async def trigger_gift_alert(gift_name, floor, drop_price, gift_id, market, gift
         await send_custom_msg(cid, msg, extra_buttons=btn, skip_news=True)
 
 # ==========================================
-# MRKT API Functions
+# MRKT API Functions (مع لوجات ذكية للتتبع)
 # ==========================================
 def get_mrkt_payload(collections=None, cursor="", ordering="Price"):
     return {
@@ -230,27 +230,42 @@ def make_mrkt_headers(token):
 
 async def get_mrkt_auth_token():
     global pyro_client
+    print("🔄 [MRKT Auth] جاري محاولة جلب التوكن من سيرفر مركت...")
     try:
         if not pyro_client.is_connected:
+            print("🔄 [MRKT Auth] حساب بايروجرام غير متصل، جاري الاتصال...")
             await pyro_client.connect()
+        else:
+            print("✅ [MRKT Auth] حساب بايروجرام متصل بالفعل.")
+            
         try:
+            print("🔄 [MRKT Auth] جاري تهيئة Peer للبوت...")
             peer = await pyro_client.resolve_peer('mrkt')
             bot = InputUser(user_id=peer.user_id, access_hash=peer.access_hash)
             bot_app = InputBotAppShortName(bot_id=bot, short_name="app")
+            print("✅ [MRKT Auth] تم تهيئة الـ Peer بنجاح.")
         except Exception as e: 
-            print(f"⚠️ [MRKT Auth Error] {e}")
+            print(f"⚠️ [MRKT Auth Error] فشل تهيئة البوت (مشكلة في الجلسة غالباً): {e}")
             return None
 
+        print("🔄 [MRKT Auth] جاري استخراج init_data من الـ WebView...")
         web_view = await pyro_client.invoke(RequestAppWebView(peer=peer, app=bot_app, platform="android", write_allowed=True))
         init_data = unquote(web_view.url.split('tgWebAppData=', 1)[1].split('&tgWebAppVersion', 1)[0])
+        print("✅ [MRKT Auth] تم استخراج init_data بنجاح.")
 
+        print("🔄 [MRKT Auth] جاري إرسال الطلب لـ tgmrkt.io...")
         async with AsyncSession(impersonate="chrome") as s:
             r = await s.post("https://api.tgmrkt.io/api/v1/auth", json={"data": init_data}, headers={"Referer": "https://cdn.tgmrkt.io/"})
+            print(f"📥 [MRKT Auth] استجابة سيرفر المصادقة: {r.status_code}")
             if r.status_code == 200:
                 token = r.json().get('token')
-                if token: return token
+                if token: 
+                    print("🎉 [MRKT Auth] تم الحصول على التوكن (Token) بنجاح!")
+                    return token
+            else:
+                print(f"⚠️ [MRKT Auth Error] السيرفر رفض الطلب: {r.text}")
     except Exception as e: 
-        print(f"⚠️ [MRKT General Error] {e}")
+        print(f"⚠️ [MRKT General Error] خطأ غير متوقع: {e}")
     return None
 
 async def mrkt_updater_loop():
@@ -258,18 +273,19 @@ async def mrkt_updater_loop():
     while True:
         try:
             if not mrkt_token: 
+                print("🔄 [MRKT Loop] التوكن مفقود، يتم طلب توكن جديد...")
                 mrkt_token = await get_mrkt_auth_token()
                 
             if mrkt_token:
                 headers = make_mrkt_headers(mrkt_token)
-                json_data = get_mrkt_payload([], cursor="", ordering="Price")
                 
                 async with AsyncSession(impersonate="chrome") as s:
-                    # 1. تحديث الفلور العام وصيد الهدايا من نفس الطلب
-                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
+                    # 1. تحديث الفلور العام
+                    # print("🔄 [MRKT Loop] جاري طلب تحديث الفلور...") # مخفي لمنع الزحمة
+                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=get_mrkt_payload([], cursor="", ordering="Price"))
                     
                     if r.status_code in [401, 403]:
-                        print(f"⚠️ [MRKT] Session rejected ({r.status_code}).")
+                        print(f"⚠️ [MRKT Loop] تم رفض التوكن (الرمز {r.status_code})، سيتم إزالته وتجديده.")
                         mrkt_token = None 
                         await asyncio.sleep(5)
                         continue
@@ -277,7 +293,6 @@ async def mrkt_updater_loop():
                     if r.status_code == 200:
                         gifts = r.json().get('gifts', [])
                         if gifts:
-                            # تحديث الفلور
                             cheapest = gifts[0]
                             ton_price = extract_ton_price_mrkt(cheapest)
                             if ton_price:
@@ -289,29 +304,35 @@ async def mrkt_updater_loop():
                                 gift_num = cheapest.get("number")
                                 clean_url_name = mrkt_floor['name'].lower().replace(' ', '').replace('’', '').replace("'", "")
                                 mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}" if gift_num else f"https://t.me/nft/{clean_url_name}"
+                    else:
+                        print(f"⚠️ [MRKT Loop] استجابة غير متوقعة عند تحديث الفلور: {r.status_code}")
 
-                            # فحص الهدايا للصيد
-                            if gift_alert_users:
-                                for g in gifts[:5]:
-                                    g_id = g.get("id")
-                                    if not g_id or g_id in notified_mrkt_gifts: continue
+                    # 2. فحص الهدايا الحديثة جداً لنظام صيد الهدايا (خصم 6%)
+                    if gift_alert_users:
+                        r_rec = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=get_mrkt_payload([], cursor="", ordering=None))
+                        if r_rec.status_code == 200:
+                            recent_gifts = r_rec.json().get('gifts', [])
+                            for g in recent_gifts:
+                                g_id = g.get("id")
+                                if not g_id or g_id in notified_mrkt_gifts: continue
+                                
+                                g_ton_price = extract_ton_price_mrkt(g)
+                                if g_ton_price:
+                                    gift_name = g.get("collectionName") or g.get("title") or "Unknown"
+                                    clean_target_name = gift_name.lower().replace(' ', '').replace('’', '').replace("'", "")
                                     
-                                    g_ton_price = extract_ton_price_mrkt(g)
-                                    if g_ton_price:
-                                        gift_name = g.get("collectionName") or g.get("title") or "Unknown"
-                                        clean_target_name = gift_name.lower().replace(' ', '').replace('’', '').replace("'", "")
+                                    # الاعتماد على الفلور من قاعدة بيانات تونيل 
+                                    known_prices = [item['price'] for item in active_listings.values() if item['name'].lower().replace(' ', '').replace('’', '').replace("'", "") == clean_target_name and item['price'] > 0]
+                                    current_floor = min(known_prices) if known_prices else 0
                                         
-                                        known_prices = [item['price'] for item in active_listings.values() if item['name'].lower().replace(' ', '').replace('’', '').replace("'", "") == clean_target_name and item['price'] > 0]
-                                        current_floor = min(known_prices) if known_prices else 0
-                                            
-                                        if current_floor > 0 and g_ton_price <= (current_floor * 0.94):
-                                            notified_mrkt_gifts.add(g_id)
-                                            if len(notified_mrkt_gifts) > 5000: notified_mrkt_gifts.clear()
-                                            asyncio.create_task(trigger_gift_alert(gift_name, current_floor, g_ton_price, g_id, "MRKT", g.get("number")))
+                                    if current_floor > 0 and g_ton_price <= (current_floor * 0.94):
+                                        notified_mrkt_gifts.add(g_id)
+                                        if len(notified_mrkt_gifts) > 5000: notified_mrkt_gifts.clear()
+                                        print(f"🎯 [MRKT Sniper] تم التقاط هدية مخفضة: {gift_name} بسعر {g_ton_price} (الفلور: {current_floor})")
+                                        asyncio.create_task(trigger_gift_alert(gift_name, current_floor, g_ton_price, g_id, "MRKT", g.get("number")))
         except Exception as e: 
-            print(f"⚠️ [MRKT Updater Error]: {e}")
-            
-        await asyncio.sleep(10)
+            print(f"⚠️ [MRKT Updater Loop Error] {e}")
+        await asyncio.sleep(15)
 
 # ==========================================
 # دالة إرسال الرسائل وتعديلها
@@ -421,7 +442,6 @@ async def process_event(event, is_live=False):
 
     if ev_type in ["listing.created", "premarket.listing_created", "listing.price_changed"]:
         if ev_data.get('asset') == 'TON':
-            # تونيل فقط للتخزين ولا نستخدمه للتنبيهات
             active_listings[gift_id] = {
                 'price': float(ev_data.get('price', 0)),
                 'name': gift_info.get('gift_name', 'Unknown'),
@@ -721,6 +741,9 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
         await edit_custom_msg(chat_id, msg_id, f"عنوان المحفضه خطا ! {FAIL_EMOJI}")
     return ConversationHandler.END
 
+# ==========================================
+# أنظمة الصرافة والأسعار
+# ==========================================
 def normalize_currency(curr_str):
     curr = curr_str.lower().strip()
     if curr in ['دولار', 'usdt', 'usd']: return 'USD'
@@ -1112,6 +1135,7 @@ async def check_alerts_loop(app: Application):
         alerts_db = [a for a in alerts_db if a['active']]
 
 async def post_init(app: Application):
+    print("🚀 [System] جاري بدء المهام الخلفية...")
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
     asyncio.create_task(tonnel_websocket_loop()) 
@@ -1227,13 +1251,15 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
     msg_wait = await send_custom_msg(chat_id, f"جاري البحث في مركت عن <b>{raw_query}</b>... {SEARCH_EMOJI}", msg_id)
     
     global mrkt_token
-    if not mrkt_token: mrkt_token = await get_mrkt_auth_token()
+    if not mrkt_token: 
+        mrkt_token = await get_mrkt_auth_token()
     
     if not mrkt_token:
         await edit_custom_msg(chat_id, msg_wait, f"عذراً، يوجد مشكلة في الاتصال بـ MRKT حالياً. {WARN_EMOJI}")
         return ConversationHandler.END
 
     exact_name = resolve_gift_name_mrkt(raw_query)
+    print(f"🔍 [MRKT Search] جاري البحث عن: {exact_name}")
     
     collections_list = [exact_name, exact_name.replace("’", "'"), exact_name.replace("'", "’")] if exact_name else []
     collections_list = list(set(collections_list)) 
@@ -1247,6 +1273,7 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
                 r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=make_mrkt_headers(mrkt_token), json=json_data)
                 
                 if r.status_code in [401, 403]:
+                    print(f"⚠️ [MRKT Search] تم رفض التوكن ({r.status_code})")
                     mrkt_token = None
                     await edit_custom_msg(chat_id, msg_wait, f"انتهت صلاحية الاتصال بـ MRKT، حاول مرة أخرى. {WARN_EMOJI}")
                     return ConversationHandler.END
@@ -1266,8 +1293,12 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
                     next_cursor = data.get("cursor")
                     if not next_cursor or next_cursor == cursor: break
                     cursor = next_cursor
-                else: break
-        except: break
+                else: 
+                    print(f"⚠️ [MRKT Search] السيرفر رد بكود {r.status_code}")
+                    break
+        except Exception as e: 
+            print(f"⚠️ [MRKT Search Exception] {e}")
+            break
 
     if found_gift:
         ton_price = extract_ton_price_mrkt(found_gift)
@@ -1378,8 +1409,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'الف': 1e3, 'مليون': 1e6, 'بليون': 1e9, 'مليار': 1e9, 'ترليون': 1e12, 'كوادرليون': 1e15
     }
     
-    calc_match = re.search(r'(?:(\d+(?:\.\d+)?)\s*)?(الف|مليون|بليون|مليار|ترليون|كوادرليون)?\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)(?:\s|$)', text)
-    if calc_match:
+    # دعم الأرقام مع الفواصل (مثل 7.3) ودعم الكلمات المليونية بشكل ذكي
+    calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(?:(\d+(?:\.\d+)?)\s*)?(الف|مليون|بليون|مليار|ترليون|كوادرليون)?\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)\s*$', text)
+    if calc_match and (calc_match.group(1) or calc_match.group(2)):
         amount_str = calc_match.group(1)
         amount = float(amount_str) if amount_str else 1.0
         
