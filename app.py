@@ -31,17 +31,17 @@ logging.getLogger("pyrogram").setLevel(logging.ERROR)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
-TOKEN = "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8"
+# ==========================================
+# إعدادات التوكن والجلسة من الـ Secret
+# ==========================================
+TOKEN = os.environ.get("BOT_TOKEN", "8679057078:AAE-k1jPdS77wPbDsz43aMlKeZqYZynipt8")
+PYRO_API_ID = int(os.environ.get("PYRO_API_ID", 12345678)) 
+PYRO_API_HASH = os.environ.get("PYRO_API_HASH", "PUT_YOUR_API_HASH_HERE")
+RAW_SESSION = os.environ.get("SESSION_NAME", "mrkt_session")
+
 ADMIN_IDS = [7126816492, 1955081272]
 DB_FILE = "tonnel_db.json"
 
-# ==========================================
-# إعدادات جلسة Pyrogram لـ MRKT
-# ==========================================
-PYRO_API_ID = int(os.environ.get("PYRO_API_ID", 12345678)) 
-PYRO_API_HASH = os.environ.get("PYRO_API_HASH", "PUT_YOUR_API_HASH_HERE")
-
-RAW_SESSION = os.environ.get("SESSION_NAME", "mrkt_session")
 if len(RAW_SESSION) > 50:
     pyro_client = PyroClient(
         name="mrkt_memory",
@@ -168,11 +168,19 @@ KNOWN_GIFTS = [
 ]
 
 def format_exact_price(price):
+    if price == int(price): return str(int(price))
     return f"{float(price):.2f}".rstrip('0').rstrip('.')
 
 def format_large_amount(amt):
     if amt == int(amt): return f"{int(amt):,}"
     return f"{amt:,.2f}"
+
+def extract_ton_price_mrkt(g):
+    for key in ["price", "salePrice", "salePriceWithoutFee", "priceNano", "floorPriceNanoTONsByCollection"]:
+        val = g.get(key)
+        if val is not None and isinstance(val, (int, float)) and val > 0:
+            return val / 1e9 if val > 1e6 else float(val)
+    return None
 
 # ==========================================
 # نظام صيد الهدايا (Sniper - 6% Discount) - لمركت حصراً
@@ -251,24 +259,28 @@ async def mrkt_updater_loop():
         try:
             if not mrkt_token: 
                 mrkt_token = await get_mrkt_auth_token()
+                
             if mrkt_token:
                 headers = make_mrkt_headers(mrkt_token)
+                json_data = get_mrkt_payload([], cursor="", ordering="Price")
                 
                 async with AsyncSession(impersonate="chrome") as s:
-                    # 1. تحديث الفلور العام لـ MRKT
-                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=get_mrkt_payload([], cursor="", ordering="Price"))
+                    # 1. تحديث الفلور العام وصيد الهدايا من نفس الطلب
+                    r = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_data)
+                    
                     if r.status_code in [401, 403]:
+                        print(f"⚠️ [MRKT] Session rejected ({r.status_code}).")
                         mrkt_token = None 
-                        await asyncio.sleep(10)
+                        await asyncio.sleep(5)
                         continue
                     
                     if r.status_code == 200:
                         gifts = r.json().get('gifts', [])
                         if gifts:
+                            # تحديث الفلور
                             cheapest = gifts[0]
-                            price = next((cheapest.get(k) for k in ["salePrice", "salePriceWithoutFee"] if isinstance(cheapest.get(k), (int, float)) and cheapest.get(k) > 0), None)
-                            if price:
-                                ton_price = price / 1_000_000_000
+                            ton_price = extract_ton_price_mrkt(cheapest)
+                            if ton_price:
                                 mrkt_floor['price'] = format_exact_price(ton_price)
                                 mrkt_floor['name'] = cheapest.get("collectionName") or cheapest.get("title") or "Unknown"
                                 gift_id = cheapest.get("id")
@@ -278,37 +290,28 @@ async def mrkt_updater_loop():
                                 clean_url_name = mrkt_floor['name'].lower().replace(' ', '').replace('’', '').replace("'", "")
                                 mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}" if gift_num else f"https://t.me/nft/{clean_url_name}"
 
-                    # 2. صيد الهدايا من MRKT (بترتيب زمني None)
-                    if gift_alert_users:
-                        # ordering=None لجلب أحدث الهدايا نزولاً
-                        r_rec = await s.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=get_mrkt_payload([], cursor="", ordering=None))
-                        if r_rec.status_code == 200:
-                            recent_gifts = r_rec.json().get('gifts', [])
-                            for g in recent_gifts:
-                                g_id = g.get("id")
-                                if not g_id or g_id in notified_mrkt_gifts: continue
-                                
-                                price_val = next((g.get(k) for k in ["salePrice", "salePriceWithoutFee"] if isinstance(g.get(k), (int, float)) and g.get(k) > 0), None)
-                                if price_val:
-                                    ton_price = price_val / 1e9
-                                    gift_name = g.get("collectionName") or g.get("title") or "Unknown"
+                            # فحص الهدايا للصيد
+                            if gift_alert_users:
+                                for g in gifts[:5]:
+                                    g_id = g.get("id")
+                                    if not g_id or g_id in notified_mrkt_gifts: continue
                                     
-                                    clean_target_name = gift_name.lower().replace(' ', '').replace('’', '').replace("'", "")
-                                    known_prices = []
-                                    for item in active_listings.values():
-                                        clean_item_name = item['name'].lower().replace(' ', '').replace('’', '').replace("'", "")
-                                        if clean_item_name == clean_target_name and item['price'] > 0:
-                                            known_prices.append(item['price'])
-                                            
-                                    current_floor = min(known_prices) if known_prices else 0
+                                    g_ton_price = extract_ton_price_mrkt(g)
+                                    if g_ton_price:
+                                        gift_name = g.get("collectionName") or g.get("title") or "Unknown"
+                                        clean_target_name = gift_name.lower().replace(' ', '').replace('’', '').replace("'", "")
                                         
-                                    if current_floor > 0 and ton_price <= (current_floor * 0.94):
-                                        notified_mrkt_gifts.add(g_id)
-                                        if len(notified_mrkt_gifts) > 5000: notified_mrkt_gifts.clear()
-                                        asyncio.create_task(trigger_gift_alert(gift_name, current_floor, ton_price, g_id, "MRKT", g.get("number")))
-        except Exception as e:
-            print(f"⚠️ [MRKT Loop Error]: {e}")
-        await asyncio.sleep(15)
+                                        known_prices = [item['price'] for item in active_listings.values() if item['name'].lower().replace(' ', '').replace('’', '').replace("'", "") == clean_target_name and item['price'] > 0]
+                                        current_floor = min(known_prices) if known_prices else 0
+                                            
+                                        if current_floor > 0 and g_ton_price <= (current_floor * 0.94):
+                                            notified_mrkt_gifts.add(g_id)
+                                            if len(notified_mrkt_gifts) > 5000: notified_mrkt_gifts.clear()
+                                            asyncio.create_task(trigger_gift_alert(gift_name, current_floor, g_ton_price, g_id, "MRKT", g.get("number")))
+        except Exception as e: 
+            print(f"⚠️ [MRKT Updater Error]: {e}")
+            
+        await asyncio.sleep(10)
 
 # ==========================================
 # دالة إرسال الرسائل وتعديلها
@@ -402,6 +405,7 @@ async def floor_updater_loop():
 
 async def process_event(event, is_live=False):
     global active_listings, last_event_id, seen_events, needs_db_save
+    
     ev_id = event.get('eventId')
     if not ev_id: return
     if ev_id in seen_events: return
@@ -717,9 +721,6 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
         await edit_custom_msg(chat_id, msg_id, f"عنوان المحفضه خطا ! {FAIL_EMOJI}")
     return ConversationHandler.END
 
-# ==========================================
-# أنظمة الصرافة والأسعار (تم تفعيل مضاعفات الأرقام بذكاء)
-# ==========================================
 def normalize_currency(curr_str):
     curr = curr_str.lower().strip()
     if curr in ['دولار', 'usdt', 'usd']: return 'USD'
@@ -1233,6 +1234,7 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
         return ConversationHandler.END
 
     exact_name = resolve_gift_name_mrkt(raw_query)
+    
     collections_list = [exact_name, exact_name.replace("’", "'"), exact_name.replace("'", "’")] if exact_name else []
     collections_list = list(set(collections_list)) 
     
@@ -1268,15 +1270,8 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
         except: break
 
     if found_gift:
-        price = None
-        for key in ["salePrice", "salePriceWithoutFee", "floorPriceNanoTONsByCollection"]:
-            val = found_gift.get(key)
-            if isinstance(val, (int, float)) and val > 0:
-                price = int(val)
-                break
-        
-        if price:
-            ton_price = price / 1_000_000_000
+        ton_price = extract_ton_price_mrkt(found_gift)
+        if ton_price:
             gift_name = found_gift.get("collectionName") or found_gift.get("title") or "Unknown"
             gift_id = found_gift.get("id")
             
@@ -1383,10 +1378,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'الف': 1e3, 'مليون': 1e6, 'بليون': 1e9, 'مليار': 1e9, 'ترليون': 1e12, 'كوادرليون': 1e15
     }
     
-    calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(?:(\d+(?:\.\d+)?)\s*)?(الف|مليون|بليون|مليار|ترليون|كوادرليون)?\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)\s*$', text)
-    if calc_match and (calc_match.group(1) or calc_match.group(2)):
+    calc_match = re.search(r'(?:(\d+(?:\.\d+)?)\s*)?(الف|مليون|بليون|مليار|ترليون|كوادرليون)?\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)(?:\s|$)', text)
+    if calc_match:
         amount_str = calc_match.group(1)
         amount = float(amount_str) if amount_str else 1.0
+        
         mult = calc_match.group(2)
         if mult:
             amount *= multiplier_map[mult]
@@ -1428,13 +1424,15 @@ def main():
             ASK_CURRENCY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), alert_currency_name)],
             ASK_CURRENCY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), alert_currency_price)]
         },
-        fallbacks=cancel_handlers + [MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts)]
+        fallbacks=cancel_handlers + [MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts)],
+        per_chat=True, per_user=True, per_message=False
     )
     
     wallet_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={ASK_WALLET: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), receive_wallet_address)]},
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True, per_message=False
     )
     
     search_conv_handler = ConversationHandler(
@@ -1444,19 +1442,22 @@ def main():
             ASK_GIFT_SEARCH_TONNEL: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), perform_gift_search_tonnel)],
             ASK_GIFT_SEARCH_MRKT: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), perform_gift_search_mrkt)]
         },
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True, per_message=False
     )
     
     ban_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("ban", ban_start), MessageHandler(filters.Regex(r'^/?حظر$'), ban_start)],
         states={ASK_BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), ban_receive)]},
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True, per_message=False
     )
     
     unban_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("unban", unban_start), MessageHandler(filters.Regex(r'^/?الغاء حظر$|/?الغاء الحظر$'), unban_start)],
         states={ASK_UNBAN: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), unban_receive)]},
-        fallbacks=cancel_handlers
+        fallbacks=cancel_handlers,
+        per_chat=True, per_user=True, per_message=False
     )
     
     app.add_handler(alert_conv_handler)
