@@ -28,8 +28,8 @@ ADMIN_IDS = [7126816492, 1955081272]
 DB_FILE = "tonnel_db.json"
 HISTORY_FILE = "price_history.json"
 TONAPI_KEY = os.environ.get("TONAPI_KEY", "")
-# اسم الميني اب المختصر من BotFather (افتراضياً SrF). يقبل الاسم او الرابط كامل (https://t.me/bot/SrF)
-MINIAPP_SHORT_NAME = (os.environ.get("MINIAPP_SHORT_NAME") or "SrF").replace(" ", "").rstrip("/").split("/")[-1].split("?")[0]
+# اسم الميني اب المختصر من BotFather (افتراضياً Rus). يقبل الاسم او الرابط كامل (https://t.me/bot/Rus)
+MINIAPP_SHORT_NAME = (os.environ.get("MINIAPP_SHORT_NAME") or "Rus").replace(" ", "").rstrip("/").split("/")[-1].split("?")[0]
 IRAQ_TZ = timezone(timedelta(hours=3))
 
 NEWS_URL = "https://t.me/Guidance_nft"
