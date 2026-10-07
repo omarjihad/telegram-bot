@@ -11,8 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # نسخ كل ملفات البوت (app.py وباقي الملفات)
 COPY . .
 
-# فتح البورت الخاص بـ Hugging Face
-EXPOSE 7860
+# البورت الافتراضي (Koyeb يستخدم 8000)
+EXPOSE 8000
 
 # أمر تشغيل البوت
 CMD ["python", "app.py"]

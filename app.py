@@ -28,7 +28,8 @@ ADMIN_IDS = [7126816492, 1955081272]
 DB_FILE = "tonnel_db.json"
 HISTORY_FILE = "price_history.json"
 TONAPI_KEY = os.environ.get("TONAPI_KEY", "")
-MINIAPP_SHORT_NAME = os.environ.get("MINIAPP_SHORT_NAME", "")
+# يقبل الاسم المختصر (SrF) او الرابط كامل (https://t.me/bot/SrF) وياخذ الاسم من اخره
+MINIAPP_SHORT_NAME = os.environ.get("MINIAPP_SHORT_NAME", "").replace(" ", "").rstrip("/").split("/")[-1].split("?")[0]
 IRAQ_TZ = timezone(timedelta(hours=3))
 
 NEWS_URL = "https://t.me/Guidance_nft"
@@ -727,7 +728,10 @@ def format_time_ago(ts):
 def get_webapp_base():
     url = os.environ.get("WEBAPP_URL", "")
     if not url and os.environ.get("SPACE_HOST"): url = f"https://{os.environ['SPACE_HOST']}"
+    if not url and os.environ.get("KOYEB_PUBLIC_DOMAIN"): url = f"https://{os.environ['KOYEB_PUBLIC_DOMAIN']}"
     if not url: url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    url = url.strip()
+    if url.endswith("/app"): url = url[:-4]
     return url.rstrip('/') if url.startswith("https://") else ""
 
 def wallet_activity_button(address, chat_type, bot_username):
@@ -1857,7 +1861,7 @@ def api_wallet_nfts(address):
     try: data = asyncio.run(fetch_wallet_nfts(address, min(int(offset), 100000) if offset.isdigit() else 0))
     except Exception: data = None
     return api_response(data) if data is not None else api_response({"error": "unavailable"}, 502)
-def run_web(): web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 7860)), threaded=True)
+def run_web(): web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)), threaded=True)
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
