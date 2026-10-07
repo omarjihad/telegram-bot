@@ -309,7 +309,8 @@ async def send_photo_msg(chat_id, photo_bytes, caption, reply_to_message_id=None
     data = await tg_api("sendPhoto", form=make_form(extra_buttons))
     if not data.get("ok") and extra_buttons and data.get("error_code") == 400:
         data = await tg_api("sendPhoto", form=make_form(None))
-    return data.get("ok", False)
+    if data.get("ok"): return data.get("result", {}).get("message_id")
+    return None
 
 async def edit_photo_msg(chat_id, message_id, photo_bytes, caption, extra_buttons=None):
     form = aiohttp.FormData()
@@ -319,7 +320,7 @@ async def edit_photo_msg(chat_id, message_id, photo_bytes, caption, extra_button
     form.add_field("reply_markup", json.dumps(build_keyboard(extra_buttons)))
     form.add_field("chart", photo_bytes, filename="chart.png", content_type="image/png")
     data = await tg_api("editMessageMedia", form=form)
-    return data.get("ok", False)
+    return data
 
 def load_market_db():
     global active_listings, last_event_id
@@ -998,7 +999,7 @@ def load_price_history():
 
 price_history = load_price_history()
 
-def record_price_history(code, value, min_gap=300):
+def record_price_history(code, value, min_gap=240):
     # نحفظ نقطة كل 5 دقايق على الاقل ونخلي اخر 30 يوم بس
     now = time.time()
     points = price_history.setdefault(code, [])
@@ -1195,7 +1196,7 @@ async def get_chart_series(code, tf):
     if code in ('IQD', 'ASIA'):
         cutoff = time.time() - frame["seconds"]
         points = [(int(t), float(v)) for t, v in price_history.get('IQD', []) if t >= cutoff]
-        if len(points) < 2 or points[-1][0] - points[0][0] < 3600: return None
+        if len(points) < 2 or points[-1][0] - points[0][0] < 600: return None
         if code == 'ASIA': points = [(t, v / 0.9) for t, v in points]
         return {"kind": "line", "data": points}
     return None
@@ -1296,11 +1297,42 @@ def build_chart_caption(code, tf, stats):
             f"💵 السعر الحالي: <b>{prefix}{format_chart_price(code, stats['last'])}{unit}</b>\n"
             f"📊 الحركة: <b>{state} {stats['change']:+.2f}%</b> {trend}\n"
             f"🔺 أعلى: <b>{prefix}{format_chart_price(code, stats['high'])}</b>   🔻 أدنى: <b>{prefix}{format_chart_price(code, stats['low'])}</b>\n\n"
+            f"🔄 يتحدث تلقائياً كل 5 دقائق — آخر تحديث {datetime.now(IRAQ_TZ).strftime('%H:%M')}\n"
             f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>')
 
+CHART_SWITCH = [('TON', "جرام"), ('BTC', "بتكوين"), ('IQD', "ماستر"), ('ASIA', "اسيا")]
+
 def chart_buttons(code, tf):
-    row = [{"text": CHART_TIMEFRAMES[k]["ar"], "callback_data": f"chart|{code}|{k}", "style": "success" if k == tf else "primary"} for k in CHART_TIMEFRAMES]
-    return [row]
+    frames = [{"text": CHART_TIMEFRAMES[k]["ar"], "callback_data": f"chart|{code}|{k}", "style": "success" if k == tf else "primary"} for k in CHART_TIMEFRAMES]
+    assets = [{"text": name, "callback_data": f"chart|{c}|{tf}", "style": "success" if c == code else "primary"} for c, name in CHART_SWITCH]
+    return [frames, assets]
+
+# رسائل المؤشر الحية: لكل كروب آخر مؤشر بس يتحدث كل 5 دقايق لمدة 12 ساعة
+LIVE_CHART_SECONDS = 12 * 3600
+live_charts = {}
+BOT_USERNAME = {"name": ""}
+
+def register_live_chart(chat_id, message_id, code, tf):
+    live_charts[chat_id] = {"message_id": message_id, "code": code, "tf": tf, "until": time.time() + LIVE_CHART_SECONDS}
+
+async def live_chart_loop():
+    while True:
+        await asyncio.sleep(300)
+        now = time.time()
+        for chat_id, item in list(live_charts.items()):
+            if item["until"] < now:
+                live_charts.pop(chat_id, None)
+                continue
+            try:
+                png, caption = await make_chart(item["code"], item["tf"], f"@{BOT_USERNAME['name']}" if BOT_USERNAME["name"] else "")
+                if not png: continue
+                data = await edit_photo_msg(chat_id, item["message_id"], png, caption, extra_buttons=chart_buttons(item["code"], item["tf"]))
+                desc = str(data.get("description", "")).lower()
+                if not data.get("ok") and ("not found" in desc or "can't be edited" in desc or "chat not found" in desc or data.get("error_code") == 403):
+                    live_charts.pop(chat_id, None)
+            except Exception as e:
+                logging.warning(f"live chart error: {e}")
+            await asyncio.sleep(0.5)
 
 async def make_chart(code, tf, watermark=""):
     cached = chart_cache.get((code, tf))
@@ -1319,11 +1351,15 @@ async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, code, t
     except Exception as e:
         logging.warning(f"chart error {code}: {e}")
         png, caption = None, None
-    if png and await send_photo_msg(chat_id, png, caption, msg_id, extra_buttons=chart_buttons(code, tf)):
-        return
+    if png:
+        sent_id = await send_photo_msg(chat_id, png, caption, msg_id, extra_buttons=chart_buttons(code, tf))
+        if sent_id:
+            register_live_chart(chat_id, sent_id, code, tf)
+            return
     # اذا المؤشر ما متوفر نرجع رسالة السعر العادية حتى المستخدم ياخذ جواب دائماً
     await update_prices_if_needed()
-    await send_custom_msg(chat_id, cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}", msg_id)
+    note = f"<i>مؤشر {CHART_ASSETS[code]['ar']} يتجهز، البوت يجمع الأسعار كل 5 دقايق {WAIT_EMOJI}</i>\n\n" if code in ('IQD', 'ASIA') else ""
+    await send_custom_msg(chat_id, note + cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}", msg_id)
 
 async def chart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1337,16 +1373,19 @@ async def chart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if code not in CHART_ASSETS or tf not in CHART_TIMEFRAMES:
         await query.answer()
         return
-    await query.answer(f"جاري تحميل مؤشر {CHART_TIMEFRAMES[tf]['ar']}... ⏳")
     try:
         png, caption = await make_chart(code, tf, f"@{context.bot.username}" if context.bot.username else "")
     except Exception as e:
         logging.warning(f"chart error {code}: {e}")
         png = None
     if not png:
-        await query.answer("المؤشر غير متوفر حالياً، حاول بعد شوية", show_alert=True)
+        msg = f"مؤشر {CHART_ASSETS[code]['ar']} يتجهز، البوت يجمع الأسعار كل 5 دقايق ⏳" if code in ('IQD', 'ASIA') else "المؤشر غير متوفر حالياً، حاول بعد شوية"
+        await query.answer(msg, show_alert=True)
         return
-    await edit_photo_msg(query.message.chat.id, query.message.message_id, png, caption, extra_buttons=chart_buttons(code, tf))
+    await query.answer(f"مؤشر {CHART_ASSETS[code]['ar']} — {CHART_TIMEFRAMES[tf]['ar']}")
+    chat_id, message_id = query.message.chat.id, query.message.message_id
+    await edit_photo_msg(chat_id, message_id, png, caption, extra_buttons=chart_buttons(code, tf))
+    register_live_chart(chat_id, message_id, code, tf)
 
 def detect_chart_request(text):
     if text in CHART_WORDS: return CHART_WORDS[text]
@@ -1639,13 +1678,79 @@ async def post_init(app: Application):
     asyncio.create_task(floor_updater_loop())
     asyncio.create_task(mrkt_updater_loop())
     asyncio.create_task(price_history_loop())
+    asyncio.create_task(live_chart_loop())
+    BOT_USERNAME["name"] = app.bot.username or ""
 
 async def price_history_loop():
-    # يجمع سعر الماستر كل 5 دقايق حتى يشتغل مؤشر الماستر واسيا
+    # يجمع سعر الماستر كل 5 دقايق حتى يشتغل مؤشر الماستر واسيا، وياخذ نسخة احتياطية كل 30 دقيقة
+    await restore_price_history()
+    last_backup = time.time()
     while True:
         try: await update_prices_if_needed()
         except Exception: pass
+        if time.time() - last_backup >= 1800:
+            last_backup = time.time()
+            try: await backup_price_history()
+            except Exception as e: logging.warning(f"history backup error: {e}")
         await asyncio.sleep(300)
+
+# Koyeb يمسح الملفات مع كل نشر، فنحفظ سجل الاسعار كملف مثبت بخاص المطور ونرجعه عند التشغيل
+HISTORY_CHAT_ID = int(os.environ.get("HISTORY_CHAT_ID") or ADMIN_IDS[0])
+HISTORY_BACKUP_NAME = "price_history_backup.json"
+history_backup = {"message_id": None}
+
+def merge_price_history(data):
+    if not isinstance(data, dict): return
+    cutoff = time.time() - 31 * 86400
+    for code, pts in data.items():
+        if not isinstance(pts, list): continue
+        merged = {int(t): v for t, v in price_history.get(code, [])}
+        for item in pts:
+            try: merged.setdefault(int(item[0]), float(item[1]))
+            except Exception: continue
+        price_history[code] = [[t, merged[t]] for t in sorted(merged) if t >= cutoff]
+
+async def restore_price_history():
+    try:
+        chat = await tg_api("getChat", {"chat_id": HISTORY_CHAT_ID})
+        pinned = (chat.get("result") or {}).get("pinned_message") or {}
+        doc = pinned.get("document") or {}
+        if doc.get("file_name") != HISTORY_BACKUP_NAME: return
+        history_backup["message_id"] = pinned.get("message_id")
+        f = await tg_api("getFile", {"file_id": doc["file_id"]})
+        path = (f.get("result") or {}).get("file_path")
+        if not path: return
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.telegram.org/file/bot{TOKEN}/{path}", timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200: return
+                merge_price_history(json.loads(await resp.read()))
+        logging.info(f"price history restored: {len(price_history.get('IQD', []))} master points")
+    except Exception as e:
+        logging.warning(f"history restore error: {e}")
+
+async def backup_price_history():
+    if not price_history.get('IQD'): return
+    content = json.dumps(price_history).encode()
+    caption = "🗂 نسخة احتياطية لسعر الماستر (لمؤشر الماستر واسيا) — لا تحذفها ولا تلغي تثبيتها"
+    if history_backup["message_id"]:
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(HISTORY_CHAT_ID))
+        form.add_field("message_id", str(history_backup["message_id"]))
+        form.add_field("media", json.dumps({"type": "document", "media": "attach://file", "caption": caption}))
+        form.add_field("reply_markup", json.dumps(build_keyboard()))
+        form.add_field("file", content, filename=HISTORY_BACKUP_NAME, content_type="application/json")
+        data = await tg_api("editMessageMedia", form=form)
+        if data.get("ok"): return
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(HISTORY_CHAT_ID))
+    form.add_field("caption", caption)
+    form.add_field("disable_notification", "true")
+    form.add_field("reply_markup", json.dumps(build_keyboard()))
+    form.add_field("document", content, filename=HISTORY_BACKUP_NAME, content_type="application/json")
+    data = await tg_api("sendDocument", form=form)
+    if data.get("ok"):
+        history_backup["message_id"] = data["result"]["message_id"]
+        await tg_api("pinChatMessage", {"chat_id": HISTORY_CHAT_ID, "message_id": history_backup["message_id"], "disable_notification": True})
 
 def resolve_gift_name_mrkt(search_term):
     if not search_term: return ""
@@ -1792,7 +1897,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f'<tg-emoji emoji-id="5411597774359653692">🔍</tg-emoji> <b>بحث هدية</b>: للبحث عن ارخص سعر لهدية معينة {END_EMOJIS}\n'
         msg += f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>حاسبه</b>: لحساب أرباحك وخسائرك في العملات {END_EMOJIS}\n'
         msg += f'📱 <b>تحويل</b>: للتعرف على طريقة تحويل رصيد اسياسيل بسهولة {END_EMOJIS}\n'
-        msg += f'{UP_EMOJI} <b>مؤشر</b>: صورة مؤشر صعود ونزول الجرام (او اكتب: جرام، بتكوين، ماستر، اسيا) {END_EMOJIS}\n'
+        msg += f'{UP_EMOJI} <b>مؤشر</b>: صورة مؤشر صعود ونزول تتحدث كل 5 دقائق (جرام، بتكوين، او: مؤشر ماستر، مؤشر اسيا) {END_EMOJIS}\n'
         msg += f'{SEARCH_EMOJI} <b>ارسل اي عنوان محفظة</b>: يطلعلك رصيدها وآخر تحويل وعدد المقتنيات وأنشطتها {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
