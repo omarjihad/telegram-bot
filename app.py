@@ -28,8 +28,8 @@ ADMIN_IDS = [7126816492, 1955081272]
 DB_FILE = "tonnel_db.json"
 HISTORY_FILE = "price_history.json"
 TONAPI_KEY = os.environ.get("TONAPI_KEY", "")
-# يقبل الاسم المختصر (SrF) او الرابط كامل (https://t.me/bot/SrF) وياخذ الاسم من اخره
-MINIAPP_SHORT_NAME = os.environ.get("MINIAPP_SHORT_NAME", "").replace(" ", "").rstrip("/").split("/")[-1].split("?")[0]
+# اسم الميني اب المختصر من BotFather (افتراضياً SrF). يقبل الاسم او الرابط كامل (https://t.me/bot/SrF)
+MINIAPP_SHORT_NAME = (os.environ.get("MINIAPP_SHORT_NAME") or "SrF").replace(" ", "").rstrip("/").split("/")[-1].split("?")[0]
 IRAQ_TZ = timezone(timedelta(hours=3))
 
 NEWS_URL = "https://t.me/Guidance_nft"
@@ -43,7 +43,7 @@ else:
 CACHE_TIME = 2
 last_fetch_time = 0
 cached_msg = ""
-last_known_iqd = 153000
+last_known_iqd = 170000
 crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0.03} 
 crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0, 'BATH': 0.0} 
 daily_iqd = {'date': '', 'open_price': 0} 
@@ -444,6 +444,40 @@ async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg_id = update.message.message_id
         await send_custom_msg(chat_id, f"تم الإلغاء بنجاح. {SUCCESS_EMOJI}", msg_id)
     return ConversationHandler.END
+
+def parse_master_input(raw):
+    # يقبل 1.7 او 1700 او 170000 ويرجع سعر 100 دولار
+    try: v = float(raw.replace(",", ""))
+    except ValueError: return None
+    if v < 10: v *= 100000
+    elif v < 10000: v *= 100
+    v = int(round(v))
+    return v if IQD_PER_USD_MIN * 100 <= v <= IQD_PER_USD_MAX * 100 else None
+
+async def set_master_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global last_known_iqd, last_fetch_time
+    if update.message.from_user.id not in ADMIN_IDS: return
+    m = re.match(r'^/?(?:setmaster|تعيين الماستر|ماستر يدوي)(?:@\w+)?\s*(.*)$', update.message.text.strip(), re.IGNORECASE)
+    arg = (m.group(1) if m else "").strip().lower()
+    chat_id, msg_id = update.message.chat_id, update.message.message_id
+    if arg in ("auto", "تلقائي", "الغاء"):
+        master_manual["price"] = 0
+        last_fetch_time = 0
+        await update_prices_if_needed()
+        await send_custom_msg(chat_id, f"{SUCCESS_EMOJI} رجع سعر الماستر تلقائي.\nالسعر الحالي: <b>{last_known_iqd:,}</b> IQD", msg_id)
+        return
+    value = parse_master_input(arg) if arg else None
+    if not value:
+        mode = "يدوي" if master_manual["price"] else "تلقائي"
+        await send_custom_msg(chat_id, f"{MASTER_EMOJI} سعر الماستر الحالي: <b>{last_known_iqd:,}</b> IQD ({mode})\n\n"
+                                       "لتثبيت السعر يدوياً اكتب مثلاً:\n<code>تعيين الماستر 1700</code>\n\n"
+                                       "وللرجوع للتلقائي:\n<code>تعيين الماستر تلقائي</code>", msg_id)
+        return
+    master_manual["price"] = value
+    last_known_iqd = value
+    last_fetch_time = 0
+    record_price_history('IQD', value, min_gap=0)
+    await send_custom_msg(chat_id, f"{SUCCESS_EMOJI} تم تثبيت سعر الماستر: <b>{value:,}</b> IQD لكل 100$", msg_id)
 
 async def reset_market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return
@@ -976,20 +1010,45 @@ def record_price_history(code, value, min_gap=300):
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f: json.dump(price_history, f)
     except Exception: pass
 
+# حدود منطقية لسعر الدولار الواحد بالدينار، واسعة حتى ما نرفض السعر لو صعد او نزل هواية
+IQD_PER_USD_MIN, IQD_PER_USD_MAX = 1000, 3000
+master_manual = {"price": 0}
+
+def median_price(prices):
+    prices = sorted(p for p in prices if IQD_PER_USD_MIN <= p <= IQD_PER_USD_MAX)
+    if not prices: return None
+    mid = len(prices) // 2
+    return prices[mid] if len(prices) % 2 else (prices[mid - 1] + prices[mid]) / 2
+
+async def fetch_binance_p2p_iqd(session, pay_types):
+    payload = {"fiat": "IQD", "page": 1, "rows": 10, "tradeType": "SELL", "asset": "USDT", "countries": [], "payTypes": pay_types, "publisherType": None, "merchantCheck": False}
+    async with session.post("https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search", json=payload,
+                            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+        if resp.status != 200: return None
+        data = await resp.json(content_type=None)
+        return median_price([float(ad['adv']['price']) for ad in (data.get('data') or [])[:5]])
+
+async def fetch_bybit_p2p_iqd(session):
+    payload = {"tokenId": "USDT", "currencyId": "IQD", "side": "1", "size": "10", "page": "1", "amount": "", "authMaker": False, "canTrade": False}
+    async with session.post("https://api2.bybit.com/fiat/otc/item/online", json=payload,
+                            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=6)) as resp:
+        if resp.status != 200: return None
+        data = await resp.json(content_type=None)
+        return median_price([float(it['price']) for it in ((data.get('result') or {}).get('items') or [])[:5]])
+
 async def fetch_mastercard_price(session):
-    try:
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-        headers = {"Content-Type": "application/json"}
-        payload = {"fiat": "IQD", "page": 1, "rows": 5, "tradeType": "SELL", "asset": "USDT", "countries": [], "payTypes": ["ZainCash"], "publisherType": None, "merchantCheck": False}
-        async with session.post(url, json=payload, headers=headers, timeout=5) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get('data'):
-                    for ad in data['data']:
-                        price_float = float(ad['adv']['price'])
-                        if 1400 <= price_float <= 1650:
-                            return int(price_float * 100)
-    except Exception: pass
+    # يرجع سعر 100 دولار بالدينار. السعر اليدوي من الادمن له الاولوية
+    if master_manual["price"]: return master_manual["price"]
+    sources = [("Binance ZainCash", lambda: fetch_binance_p2p_iqd(session, ["ZainCash"])),
+               ("Binance", lambda: fetch_binance_p2p_iqd(session, [])),
+               ("Bybit", lambda: fetch_bybit_p2p_iqd(session))]
+    for name, fetch in sources:
+        try:
+            price = await fetch()
+            if price: return int(round(price * 100))
+        except Exception as e:
+            logging.warning(f"master price {name} failed: {e}")
+    logging.warning("master price: all sources failed, keeping last known price")
     return None
 
 async def update_prices_if_needed():
@@ -1820,7 +1879,11 @@ web_app = Flask(__name__)
 WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
 
 @web_app.route('/')
-def home(): return "البوت شغال بقوة 🔥"
+def home():
+    # اذا تيليجرام فتح الميني اب على الرابط الرئيسي (بدون /app) نعرض صفحة المحفظة
+    if request.args.get("tgWebAppStartParam") or request.args.get("address"):
+        return send_from_directory(WEBAPP_DIR, "wallet.html")
+    return "البوت شغال بقوة 🔥"
 
 @web_app.route('/app')
 def wallet_app(): return send_from_directory(WEBAPP_DIR, "wallet.html")
@@ -1912,6 +1975,7 @@ def main():
     ))
     
     app.add_handler(CommandHandler("reset", reset_market_cmd))
+    app.add_handler(MessageHandler(filters.Regex(r'(?i)^/?(?:setmaster|تعيين الماستر|ماستر يدوي)(?:@\w+)?(?:\s|$)'), set_master_cmd))
     app.add_handler(CallbackQueryHandler(handle_reset_callback, pattern="^reset_"))
     app.add_handler(CallbackQueryHandler(chart_callback, pattern=r"^chart\|"))
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.MY_CHAT_MEMBER))
