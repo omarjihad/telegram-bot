@@ -950,7 +950,7 @@ async def fetch_binance_ticker(session, symbols, timeout=5):
     return None
 
 async def fetch_tonapi_ton_rate(session):
-    data = await tonapi_get(session, "/v2/rates", {"tokens": "ton", "currencies": "usd"})
+    data = await tonapi_get(session, "/v2/rates", {"tokens": "ton", "currencies": "usd"}, retries=1)
     try: return float(data["rates"]["TON"]["prices"]["USD"])
     except Exception: return None
 
@@ -1103,8 +1103,6 @@ CHART_ASSETS = {
 CHART_TRIGGER_RE = re.compile(r'^/?(?:ال)?(?:مؤشر|موشر|شارت|چارت|جارت|chart)(?:\s+(?:ال)?(.+))?$')
 CHART_WORDS = {w: 'TON' for w in GRAM_WORDS + ['الجرام', 'التون']}
 CHART_WORDS.update({w: 'BTC' for w in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin', 'البتكوين']})
-CHART_WORDS.update({w: 'IQD' for w in ['ماستر', 'master', 'الماستر']})
-CHART_WORDS.update({w: 'ASIA' for w in ['اسيا', 'آسيا', 'asia']})
 CHART_WORDS.update({w: 'BATH' for w in ['باث', 'bath']})
 chart_cache = {}
 chart_lock = threading.Lock()
@@ -1266,13 +1264,7 @@ async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, code, t
         return
     # اذا المؤشر ما متوفر نرجع رسالة السعر العادية حتى المستخدم ياخذ جواب دائماً
     await update_prices_if_needed()
-    if code in ('IQD', 'ASIA'):
-        value = last_known_iqd if code == 'IQD' else int(last_known_iqd / 0.9)
-        msg = (f"{CHART_ASSETS[code]['emoji']} <b>{CHART_ASSETS[code]['ar']}</b>: <b>{value:,}</b> IQD {get_daily_trend_emoji('IQD', last_known_iqd)}\n\n"
-               f"<i>مؤشر {CHART_ASSETS[code]['ar']} يتجهز بعد ما البوت يجمع أسعار كافية {WAIT_EMOJI}</i>")
-        await send_custom_msg(chat_id, msg, msg_id)
-    else:
-        await send_custom_msg(chat_id, cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}", msg_id)
+    await send_custom_msg(chat_id, cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}", msg_id)
 
 async def chart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1817,7 +1809,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, generate_conversion_msg(amount, calc_match.group(3)), reply_to_message_id=msg_id)
         return
 
-    if text in ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "جرام", "غرام", "كرام", "قرام", "btc", "gram", "ماستر", "نجوم", "نجمة", "نج", "اسيا", "باث", "bath", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]:
+    if text in ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "جرام", "غرام", "كرام", "قرام", "btc", "gram", "ماستر", "الماستر", "master", "نجوم", "نجمة", "نج", "اسيا", "آسيا", "asia", "باث", "bath", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]:
         await update_prices_if_needed()
         await send_custom_msg(chat_id, cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}", reply_to_message_id=msg_id)
 
