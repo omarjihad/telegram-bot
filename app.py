@@ -1,6 +1,8 @@
-import os, time, aiohttp, logging, threading, asyncio, re, html, json, websockets
-from datetime import datetime
-from flask import Flask
+import os, base64
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+import time, aiohttp, logging, threading, asyncio, re, html, json, websockets
+from datetime import datetime, timezone, timedelta
+from flask import Flask, jsonify, request, send_from_directory
 from urllib.parse import unquote
 from telegram import Update
 from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes, ChatMemberHandler
@@ -24,6 +26,13 @@ RAW_SESSION = os.environ.get("SESSION_NAME", "mrkt_session")
 
 ADMIN_IDS = [7126816492, 1955081272]
 DB_FILE = "tonnel_db.json"
+HISTORY_FILE = "price_history.json"
+TONAPI_KEY = os.environ.get("TONAPI_KEY", "")
+MINIAPP_SHORT_NAME = os.environ.get("MINIAPP_SHORT_NAME", "")
+IRAQ_TZ = timezone(timedelta(hours=3))
+
+NEWS_URL = "https://t.me/Guidance_nft"
+NEWS_BTN = {"text": "اخبار الهدايا", "url": NEWS_URL, "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}
 
 if len(RAW_SESSION) > 50:
     pyro_client = PyroClient(name="mrkt_memory", api_id=PYRO_API_ID, api_hash=PYRO_API_HASH, session_string=RAW_SESSION, in_memory=True, no_updates=True)
@@ -34,8 +43,8 @@ CACHE_TIME = 2
 last_fetch_time = 0
 cached_msg = ""
 last_known_iqd = 153000
-crypto_prices = {'BTC': 0, 'GRAM': 0, 'BATH': 0.03} 
-crypto_24h_trend = {'BTC': 0.0, 'GRAM': 0.0, 'BATH': 0.0} 
+crypto_prices = {'BTC': 0, 'TON': 0, 'BATH': 0.03} 
+crypto_24h_trend = {'BTC': 0.0, 'TON': 0.0, 'BATH': 0.0} 
 daily_iqd = {'date': '', 'open_price': 0} 
 
 alerts_db = []
@@ -72,6 +81,7 @@ GIFT_FLOOR_EMOJI = '<tg-emoji emoji-id="5255980157058975232">🎁</tg-emoji>'
 MRKT_TEXT_EMOJI = '<tg-emoji emoji-id="6041916763719866213">🛒</tg-emoji>'
 MRKT_ICON_ID = "6041916763719866213"
 TONNEL_ICON_ID = "5210956306952758910"
+TONNEL_TEXT_EMOJI = '<tg-emoji emoji-id="5210956306952758910">💎</tg-emoji>'
 UP_EMOJI = '<tg-emoji emoji-id="5449683594425410231">📈</tg-emoji>'
 DOWN_EMOJI = '<tg-emoji emoji-id="5447183459602669338">📉</tg-emoji>'
 WHALE_BELL = '<tg-emoji emoji-id="5215372534060428125">🔔</tg-emoji>'
@@ -159,7 +169,13 @@ async def trigger_gift_alert(gift_name, floor, drop_price, gift_id, market, gift
                f"📉 السعر المعروض: <b>{format_exact_price(drop_price)}</b> {GRAM_EMOJI}\n"
                f"📊 الفلور الحالي: <b>{format_exact_price(floor)}</b> {GRAM_EMOJI}\n"
                f"🛒 السوق: <b>{market}</b>")
-        await send_custom_msg(cid, msg, extra_buttons=btn, skip_news=True)
+        await send_custom_msg(cid, msg, extra_buttons=btn)
+
+def extract_ton_price_mrkt(gift):
+    for k in ("salePrice", "salePriceWithoutFee"):
+        v = gift.get(k)
+        if isinstance(v, (int, float)) and v > 0: return v / 1_000_000_000
+    return None
 
 def get_mrkt_payload(collections=None, cursor="", ordering="Price"):
     return {
@@ -205,9 +221,8 @@ async def mrkt_updater_loop():
                     gifts = r.json().get('gifts', [])
                     if gifts:
                         cheapest = gifts[0]
-                        price = next((cheapest.get(k) for k in ["salePrice", "salePriceWithoutFee"] if isinstance(cheapest.get(k), (int, float)) and cheapest.get(k) > 0), None)
-                        if price:
-                            ton_price = price / 1_000_000_000
+                        ton_price = extract_ton_price_mrkt(cheapest)
+                        if ton_price:
                             mrkt_floor['price'] = format_exact_price(ton_price)
                             mrkt_floor['name'] = cheapest.get("title") or cheapest.get("collectionName") or "Unknown"
                             gift_id = cheapest.get("id")
@@ -224,9 +239,8 @@ async def mrkt_updater_loop():
                         for g in recent_gifts:
                             g_id = g.get("id")
                             if not g_id or g_id in notified_mrkt_gifts: continue
-                            price_val = next((g.get(k) for k in ["salePrice", "salePriceWithoutFee"] if isinstance(g.get(k), (int, float)) and g.get(k) > 0), None)
-                            if price_val:
-                                ton_price = price_val / 1e9
+                            ton_price = extract_ton_price_mrkt(g)
+                            if ton_price:
                                 gift_name = g.get("title") or g.get("collectionName") or "Unknown"
                                 clean_target_name = gift_name.lower().replace(' ', '').replace('’', '').replace("'", "")
                                 known_prices = [d['price'] for d in active_listings.values() if d['name'].lower().replace(' ', '').replace('’', '').replace("'", "") == clean_target_name and d['price'] > 0]
@@ -238,39 +252,73 @@ async def mrkt_updater_loop():
         except Exception: pass
         await asyncio.sleep(15)
 
-async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None, skip_news=False):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+def build_keyboard(extra_buttons=None):
     inline_keyboard = []
-    if extra_buttons: 
-        for btn_group in extra_buttons:
-            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
-            else: inline_keyboard.append([btn_group])
-    if not skip_news:
-        inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
-    if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id}
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("result", {}).get("message_id")
-        except Exception: pass
+    for btn_group in extra_buttons or []:
+        if isinstance(btn_group, list): inline_keyboard.append(btn_group)
+        else: inline_keyboard.append([btn_group])
+    if not any(b.get("url") == NEWS_URL for row in inline_keyboard for b in row):
+        inline_keyboard.append([NEWS_BTN])
+    return {"inline_keyboard": inline_keyboard}
+
+async def tg_api(method, payload=None, form=None):
+    url = f"https://api.telegram.org/bot{TOKEN}/{method}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            if form is not None: req = session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30))
+            else: req = session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10))
+            async with req as resp:
+                data = await resp.json(content_type=None)
+                if not data.get("ok"): logging.warning(f"{method} failed: {data.get('description')}")
+                return data
+    except Exception as e:
+        logging.warning(f"{method} error: {e}")
+    return {"ok": False}
+
+async def send_custom_msg(chat_id, text, reply_to_message_id=None, extra_buttons=None):
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": build_keyboard(extra_buttons), "disable_web_page_preview": True}
+    if reply_to_message_id: payload["reply_parameters"] = {"message_id": reply_to_message_id, "allow_sending_without_reply": True}
+    data = await tg_api("sendMessage", payload)
+    if not data.get("ok") and extra_buttons and data.get("error_code") == 400:
+        # اذا رفض تيليجرام احد الازرار نرسل الرسالة بزر الاخبار فقط حتى ما تضيع
+        payload["reply_markup"] = build_keyboard()
+        data = await tg_api("sendMessage", payload)
+    if data.get("ok"): return data.get("result", {}).get("message_id")
     return None
 
-async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None, skip_news=False):
-    url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
-    inline_keyboard = []
-    if extra_buttons:
-        for btn_group in extra_buttons:
-            if isinstance(btn_group, list): inline_keyboard.append(btn_group)
-            else: inline_keyboard.append([btn_group])
-    if not skip_news:
-        inline_keyboard.append([{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}])
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}, "disable_web_page_preview": True}
-    async with aiohttp.ClientSession() as session:
-        try: await session.post(url, json=payload, timeout=10)
-        except Exception: pass
+async def edit_custom_msg(chat_id, message_id, text, extra_buttons=None):
+    if not message_id: return await send_custom_msg(chat_id, text, extra_buttons=extra_buttons)
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML", "reply_markup": build_keyboard(extra_buttons), "disable_web_page_preview": True}
+    data = await tg_api("editMessageText", payload)
+    if not data.get("ok") and extra_buttons and data.get("error_code") == 400 and "not modified" not in str(data.get("description", "")):
+        payload["reply_markup"] = build_keyboard()
+        await tg_api("editMessageText", payload)
+    return message_id
+
+async def send_photo_msg(chat_id, photo_bytes, caption, reply_to_message_id=None, extra_buttons=None):
+    def make_form(buttons):
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(chat_id))
+        form.add_field("caption", caption)
+        form.add_field("parse_mode", "HTML")
+        form.add_field("reply_markup", json.dumps(build_keyboard(buttons)))
+        if reply_to_message_id: form.add_field("reply_parameters", json.dumps({"message_id": reply_to_message_id, "allow_sending_without_reply": True}))
+        form.add_field("photo", photo_bytes, filename="chart.png", content_type="image/png")
+        return form
+    data = await tg_api("sendPhoto", form=make_form(extra_buttons))
+    if not data.get("ok") and extra_buttons and data.get("error_code") == 400:
+        data = await tg_api("sendPhoto", form=make_form(None))
+    return data.get("ok", False)
+
+async def edit_photo_msg(chat_id, message_id, photo_bytes, caption, extra_buttons=None):
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(chat_id))
+    form.add_field("message_id", str(message_id))
+    form.add_field("media", json.dumps({"type": "photo", "media": "attach://chart", "caption": caption, "parse_mode": "HTML"}))
+    form.add_field("reply_markup", json.dumps(build_keyboard(extra_buttons)))
+    form.add_field("chart", photo_bytes, filename="chart.png", content_type="image/png")
+    data = await tg_api("editMessageMedia", form=form)
+    return data.get("ok", False)
 
 def load_market_db():
     global active_listings, last_event_id
@@ -353,7 +401,10 @@ async def replay_events():
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, timeout=10) as resp:
                     if resp.status == 400:
-                        last_event_id = "" 
+                        # المعرف القديم ما صالح: نبدي من جديد مرة وحدة بس حتى ما تصير حلقة لا نهائية
+                        if not last_event_id: break
+                        last_event_id = ""
+                        await asyncio.sleep(1)
                         continue
                     if resp.status == 200:
                         data = await resp.json()
@@ -402,7 +453,7 @@ async def reset_market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [{"text": "تفريغ الاثنين", "callback_data": "reset_both", "style": "danger"}],
         CANCEL_BTN
     ]
-    await send_custom_msg(update.message.chat_id, msg, skip_news=True, extra_buttons=btn)
+    await send_custom_msg(update.message.chat_id, msg, extra_buttons=btn)
 
 async def handle_reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -424,7 +475,7 @@ async def handle_reset_callback(update: Update, context: ContextTypes.DEFAULT_TY
         mrkt_token = None 
         mrkt_floor['price'] = "0"
         mrkt_floor['name'] = "جاري التحديث..."
-    await edit_custom_msg(chat_id, msg_id, "✅ تم تفريغ السوق وجلب البيانات الجديدة بنجاح.", skip_news=True)
+    await edit_custom_msg(chat_id, msg_id, "✅ تم تفريغ السوق وجلب البيانات الجديدة بنجاح.")
 
 async def track_new_user(user, context: ContextTypes.DEFAULT_TYPE):
     if user.id not in bot_users: bot_users.add(user.id)
@@ -449,26 +500,21 @@ async def is_user_banned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         trigger_warning = False
         if chat_type == 'private': trigger_warning = True
         elif text.startswith('/'): trigger_warning = True
-        elif msg.reply_to_message and context.bot.id == msg.reply_to_message.from_user.id: trigger_warning = True
+        elif msg.reply_to_message and msg.reply_to_message.from_user and context.bot.id == msg.reply_to_message.from_user.id: trigger_warning = True
         elif context.bot.username and context.bot.username.lower() in text: trigger_warning = True
         else:
-            if any(kw in text for kw in ["الاوامر", "اوامر", "فلور الهدايا", "فلور", "هدايا", "رصيدي", "تغيير محفظتي", "تفعيل التنبيهات", "بحث", "صرف", "سعر", "نبهني", "تحويل", "حاسبه", "حاسبة", "احسب"]): trigger_warning = True
+            if any(kw in text for kw in ["الاوامر", "اوامر", "فلور الهدايا", "فلور", "هدايا", "رصيدي", "تغيير محفظتي", "تفعيل التنبيهات", "بحث", "صرف", "سعر", "نبهني", "تحويل", "حاسبه", "حاسبة", "احسب", "مؤشر", "شارت"]): trigger_warning = True
 
         if trigger_warning:
             warning_msg = 'دروح عمو روح خل واحد من المطورين يفك الحظر منك عود تعال <tg-emoji emoji-id="5872697861166075790">🚫</tg-emoji>'
             btn = [[{"text": "الروسي", "url": "https://t.me/M6M9N", "style": "success", "icon_custom_emoji_id": "5372930329822659547"}], [{"text": "ساسكي", "url": "https://t.me/O1916", "style": "danger", "icon_custom_emoji_id": "5258021357446268553"}]]
-            url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-            inline_keyboard = [btn[0], btn[1], [{"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "primary", "icon_custom_emoji_id": "5224257782013769471"}]]
-            payload = {"chat_id": msg.chat_id, "text": warning_msg, "parse_mode": "HTML", "reply_markup": {"inline_keyboard": inline_keyboard}}
-            if msg.message_id: payload["reply_parameters"] = {"message_id": msg.message_id}
-            async with aiohttp.ClientSession() as session:
-                try: await session.post(url, json=payload)
-                except: pass
+            btn.append([dict(NEWS_BTN, style="primary")])
+            await send_custom_msg(msg.chat_id, warning_msg, msg.message_id, extra_buttons=btn)
         return True 
     return False
 
 async def process_ban(chat_id, msg_id, target_input, context):
-    target_id, target_name = None, target_input
+    target_id, target_name = None, html.escape(target_input)
     if target_input.startswith('@'):
         username = target_input.replace('@', '').lower()
         if username in user_mapping: target_id = user_mapping[username]
@@ -484,9 +530,9 @@ async def process_ban(chat_id, msg_id, target_input, context):
 
 async def ban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return ConversationHandler.END
-    if update.message.reply_to_message:
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
         target_id = update.message.reply_to_message.from_user.id
-        target_name = update.message.reply_to_message.from_user.first_name
+        target_name = html.escape(update.message.reply_to_message.from_user.first_name)
         if target_id in ADMIN_IDS:
             await send_custom_msg(update.message.chat_id, f"عذراً، لا يمكنك حظر المطورين! {WARN_EMOJI}", update.message.message_id)
         else:
@@ -518,7 +564,7 @@ async def process_unban(chat_id, msg_id, target_input, context):
 
 async def unban_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return ConversationHandler.END
-    if update.message.reply_to_message:
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
         target_id = update.message.reply_to_message.from_user.id
         if target_id in banned_users:
             banned_users.remove(target_id)
@@ -537,24 +583,270 @@ async def unban_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_unban(update.message.chat_id, update.message.message_id, update.message.text.strip(), context)
     return ConversationHandler.END
 
+TON_ADDRESS_RE = re.compile(r'(?<![A-Za-z0-9_-])([EUk0][Qf][A-Za-z0-9_-]{46})(?![A-Za-z0-9_-])')
+wallet_cache = {}
+
+def tonapi_headers():
+    return {"Authorization": f"Bearer {TONAPI_KEY}"} if TONAPI_KEY else {}
+
+async def tonapi_get(session, path, params=None, retries=3):
+    # tonapi بدون مفتاح يسمح طلب بالثانية تقريباً، فنعيد المحاولة اذا رجع 429
+    for attempt in range(retries):
+        try:
+            async with session.get(f"https://tonapi.io{path}", params=params, headers=tonapi_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200: return await resp.json()
+                if resp.status == 429:
+                    await asyncio.sleep(1.2 * (attempt + 1))
+                    continue
+                return None
+        except Exception:
+            await asyncio.sleep(0.5)
+    return None
+
+def crc16_xmodem(data):
+    crc = 0
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) if crc & 0x8000 else (crc << 1)
+            crc &= 0xFFFF
+    return crc
+
+def is_valid_ton_address(addr):
+    # نتأكد من الـ checksum حتى ما نرد على اي نص عشوائي طوله 48
+    if not addr or not TON_ADDRESS_RE.fullmatch(addr): return False
+    try:
+        raw = base64.urlsafe_b64decode(addr.replace('+', '-').replace('/', '_'))
+        return len(raw) == 36 and crc16_xmodem(raw[:34]) == int.from_bytes(raw[34:], 'big')
+    except Exception: return False
+
+def find_ton_address(text):
+    for m in TON_ADDRESS_RE.finditer(text or ""):
+        if is_valid_ton_address(m.group(1)): return m.group(1)
+    return None
+
+def short_addr(addr):
+    return f"{addr[:4]}…{addr[-4:]}" if addr and len(addr) > 10 else (addr or "")
+
+def account_label(acc):
+    if not isinstance(acc, dict): return ""
+    return acc.get("name") or short_addr(acc.get("address", ""))
+
+def parse_transfer_action(action, account_raw, jetton_prices):
+    # يحول عملية تحويل من tonapi لشكل بسيط، او None اذا مو تحويل
+    a_type = action.get("type")
+    if a_type == "TonTransfer":
+        d = action.get("TonTransfer", {})
+        amount = int(d.get("amount", 0)) / 1e9
+        symbol, usd_price = "GRAM", crypto_prices.get('TON', 0)
+    elif a_type == "JettonTransfer":
+        d = action.get("JettonTransfer", {})
+        jetton = d.get("jettons") or d.get("jetton") or {}
+        decimals = int(jetton.get("decimals", 9) or 9)
+        try: amount = int(d.get("amount", 0)) / (10 ** decimals)
+        except Exception: return None
+        symbol = jetton.get("symbol") or "JETTON"
+        usd_price = 1.0 if symbol in ("USD₮", "USDT") else jetton_prices.get(jetton.get("address"), 0)
+    else:
+        return None
+    sender, recipient = d.get("sender") or {}, d.get("recipient") or {}
+    outgoing = sender.get("address") == account_raw
+    return {
+        "type": a_type, "amount": amount, "symbol": symbol, "usd": amount * usd_price if usd_price else 0,
+        "direction": "out" if outgoing else "in",
+        "counterparty": recipient if outgoing else sender,
+        "comment": d.get("comment") or "",
+    }
+
+async def fetch_wallet_summary(address):
+    cached = wallet_cache.get(address)
+    if cached and time.time() - cached[0] < 30: return cached[1]
+    async with aiohttp.ClientSession() as session:
+        account = await tonapi_get(session, f"/v2/accounts/{address}")
+        if not account: return None
+        jettons = await tonapi_get(session, f"/v2/accounts/{address}/jettons", {"currencies": "usd"}) or {}
+        nfts = await tonapi_get(session, f"/v2/accounts/{address}/nfts", {"limit": 1000, "indirect_ownership": "false"}) or {}
+        events = await tonapi_get(session, f"/v2/accounts/{address}/events", {"limit": 20}) or {}
+        if not crypto_prices.get('TON'):
+            rate = await fetch_tonapi_ton_rate(session)
+            if rate: crypto_prices['TON'] = rate
+
+    ton_price = crypto_prices.get('TON', 0)
+    balance_ton = int(account.get("balance", 0)) / 1e9
+    usdt, jetton_list, jetton_prices, jettons_usd = 0.0, [], {}, 0.0
+    for b in jettons.get("balances", []):
+        j = b.get("jetton", {})
+        try: amount = int(b.get("balance", 0)) / (10 ** int(j.get("decimals", 9) or 9))
+        except Exception: continue
+        if amount <= 0 or j.get("verification") == "blacklist": continue
+        price = float(((b.get("price") or {}).get("prices") or {}).get("USD", 0) or 0)
+        jetton_prices[j.get("address")] = price
+        if j.get("symbol") in ("USD₮", "USDT"):
+            usdt = amount
+            continue
+        jettons_usd += amount * price
+        jetton_list.append({"symbol": j.get("symbol", "?"), "name": j.get("name", ""), "amount": amount, "usd": amount * price, "image": j.get("image", "")})
+    jetton_list.sort(key=lambda x: x["usd"], reverse=True)
+
+    account_raw = account.get("address", "")
+    last_transfer = None
+    for ev in events.get("events", []):
+        if ev.get("is_scam"): continue
+        for action in ev.get("actions", []):
+            parsed = parse_transfer_action(action, account_raw, jetton_prices)
+            if parsed:
+                parsed["timestamp"] = ev.get("timestamp", 0)
+                last_transfer = parsed
+                break
+        if last_transfer: break
+
+    nft_items = nfts.get("nft_items", [])
+    summary = {
+        "address": address, "raw": account_raw, "name": account.get("name") or "",
+        "status": account.get("status", ""), "interfaces": account.get("interfaces") or [],
+        "is_wallet": account.get("is_wallet", False), "last_activity": account.get("last_activity", 0),
+        "balance_ton": balance_ton, "ton_price": ton_price, "balance_usd": balance_ton * ton_price,
+        "usdt": usdt, "jettons": jetton_list, "jettons_usd": jettons_usd,
+        "nft_count": len(nft_items), "nft_more": len(nft_items) >= 1000,
+        "last_transfer": last_transfer,
+    }
+    summary["total_usd"] = summary["balance_usd"] + usdt + jettons_usd
+    wallet_cache[address] = (time.time(), summary)
+    if len(wallet_cache) > 500: wallet_cache.clear()
+    return summary
+
+def format_time_ago(ts):
+    if not ts: return "غير معروف"
+    diff = max(0, int(time.time() - ts))
+    if diff < 60: ago = "الآن"
+    elif diff < 3600: ago = f"منذ {diff // 60} دقيقة"
+    elif diff < 86400: ago = f"منذ {diff // 3600} ساعة"
+    else: ago = f"منذ {diff // 86400} يوم"
+    return f"{datetime.fromtimestamp(ts, IRAQ_TZ).strftime('%Y-%m-%d %H:%M')} ({ago})"
+
+def get_webapp_base():
+    url = os.environ.get("WEBAPP_URL", "")
+    if not url and os.environ.get("SPACE_HOST"): url = f"https://{os.environ['SPACE_HOST']}"
+    if not url: url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    return url.rstrip('/') if url.startswith("https://") else ""
+
+def wallet_activity_button(address, chat_type, bot_username):
+    # web_app يشتغل بس بالخاص، بالكروبات نستخدم رابط الميني اب المباشر او رابط الصفحة
+    base = get_webapp_base()
+    btn = {"text": "عرض أنشطته", "style": "success", "icon_custom_emoji_id": "5231200819986047254"}
+    if base and chat_type == "private":
+        btn["web_app"] = {"url": f"{base}/app?address={address}"}
+    elif MINIAPP_SHORT_NAME and bot_username:
+        btn["url"] = f"https://t.me/{bot_username}/{MINIAPP_SHORT_NAME}?startapp={address}"
+    elif base:
+        btn["url"] = f"{base}/app?address={address}"
+    else:
+        btn["url"] = f"https://tonviewer.com/{address}"
+    return btn
+
+def build_wallet_message(s):
+    lines = [f"{SEARCH_EMOJI} <b>معلومات المحفظة</b>", f"<code>{s['address']}</code>"]
+    if s["name"]: lines.append(f"🏷 الاسم: <b>{html.escape(s['name'])}</b>")
+    lines.append("")
+    lines.append(f"{GRAM_EMOJI} الرصيد: <b>{s['balance_ton']:,.2f}</b> GRAM" + (f" (≈ ${s['balance_usd']:,.2f})" if s['ton_price'] else ""))
+    lines.append(f"{USDT_CASH} USDT: <b>{s['usdt']:,.2f}</b>")
+    if s["jettons"]:
+        lines.append(f"🪙 عملات أخرى: <b>{len(s['jettons'])}</b>" + (f" (≈ ${s['jettons_usd']:,.2f})" if s['jettons_usd'] >= 0.01 else ""))
+    nft_txt = f"{s['nft_count']:,}+" if s["nft_more"] else f"{s['nft_count']:,}"
+    lines.append(f"{GIFT_FLOOR_EMOJI} المقتنيات (NFT): <b>{nft_txt}</b>")
+    if s["total_usd"] >= 0.01: lines.append(f"💰 القيمة الكلية: <b>${s['total_usd']:,.2f}</b>")
+    lines.append("╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼")
+    t = s["last_transfer"]
+    if t:
+        is_out = t["direction"] == "out"
+        dir_txt = f"إرسال {DOWN_EMOJI}" if is_out else f"استلام {UP_EMOJI}"
+        amount_txt = f"{t['amount']:,.4f}".rstrip('0').rstrip('.') if t['amount'] < 1 else f"{t['amount']:,.2f}"
+        lines.append(f"📤 آخر تحويل: <b>{dir_txt}</b>")
+        lines.append(f"💸 القيمة: <b>{amount_txt} {html.escape(t['symbol'])}</b>" + (f" (≈ ${t['usd']:,.2f})" if t['usd'] >= 0.01 else ""))
+        other = account_label(t["counterparty"])
+        if other: lines.append(f"👤 {'إلى' if is_out else 'من'}: <code>{html.escape(other)}</code>")
+        lines.append(f"🕒 الوقت: {format_time_ago(t['timestamp'])}")
+    else:
+        lines.append("📤 آخر تحويل: لا توجد تحويلات")
+    lines.append("╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼")
+    status = "نشطة ✅" if s["status"] == "active" else ("غير مفعلة" if s["status"] in ("uninit", "nonexist") else html.escape(s["status"] or "-"))
+    lines.append(f"📌 الحالة: {status}")
+    if s["last_activity"]: lines.append(f"⏱ آخر نشاط: {format_time_ago(s['last_activity'])}")
+    return "\n".join(lines)
+
+async def handle_wallet_address(update: Update, context: ContextTypes.DEFAULT_TYPE, address):
+    chat_id, msg_id = update.message.chat_id, update.message.message_id
+    wait_id = await send_custom_msg(chat_id, f"جاري فحص المحفظة... {SEARCH_EMOJI}", msg_id)
+    summary = await fetch_wallet_summary(address)
+    if not summary:
+        await edit_custom_msg(chat_id, wait_id, f"عذراً، ما كدرت أجيب معلومات هذا العنوان حالياً. {WARN_EMOJI}")
+        return
+    btn = [[wallet_activity_button(address, update.message.chat.type, context.bot.username)],
+           [{"text": "Tonviewer", "url": f"https://tonviewer.com/{address}", "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}]]
+    await edit_custom_msg(chat_id, wait_id, build_wallet_message(summary), extra_buttons=btn)
+
+async def fetch_wallet_events(address, before_lt=None):
+    params = {"limit": 25}
+    if before_lt: params["before_lt"] = before_lt
+    async with aiohttp.ClientSession() as session:
+        account = await tonapi_get(session, f"/v2/accounts/{address}")
+        data = await tonapi_get(session, f"/v2/accounts/{address}/events", params)
+    if data is None: return None
+    account_raw = (account or {}).get("address", "")
+    events = []
+    for ev in data.get("events", []):
+        actions = []
+        for action in ev.get("actions", []):
+            preview = action.get("simple_preview") or {}
+            item = {"type": action.get("type", ""), "status": action.get("status", ""),
+                    "title": preview.get("name", ""), "description": preview.get("description", ""), "value": preview.get("value", "")}
+            transfer = parse_transfer_action(action, account_raw, {})
+            if transfer:
+                cp = transfer["counterparty"] or {}
+                item.update({"direction": transfer["direction"], "amount": transfer["amount"], "symbol": transfer["symbol"],
+                             "usd": transfer["usd"], "comment": transfer["comment"],
+                             "counterparty": cp.get("address", ""), "counterparty_name": cp.get("name", "")})
+            elif action.get("type") == "NftItemTransfer":
+                d = action.get("NftItemTransfer", {})
+                item["direction"] = "out" if (d.get("sender") or {}).get("address") == account_raw else "in"
+            actions.append(item)
+        events.append({"id": ev.get("event_id"), "ts": ev.get("timestamp", 0), "lt": ev.get("lt"),
+                       "scam": ev.get("is_scam", False), "in_progress": ev.get("in_progress", False), "actions": actions})
+    return {"events": events, "next_from": data.get("next_from") or 0}
+
+def pick_nft_image(item):
+    previews = item.get("previews") or []
+    for res in ("500x500", "100x100", "1500x1500"):
+        for p in previews:
+            if p.get("resolution") == res and str(p.get("url", "")).startswith("https://"): return p["url"]
+    img = (item.get("metadata") or {}).get("image", "")
+    return img if str(img).startswith("https://") else ""
+
+async def fetch_wallet_nfts(address, offset=0):
+    async with aiohttp.ClientSession() as session:
+        data = await tonapi_get(session, f"/v2/accounts/{address}/nfts", {"limit": 48, "offset": offset, "indirect_ownership": "false"})
+    if data is None: return None
+    items = []
+    for it in data.get("nft_items", []):
+        meta = it.get("metadata") or {}
+        items.append({"address": it.get("address", ""), "name": meta.get("name") or "NFT",
+                      "collection": (it.get("collection") or {}).get("name", ""), "image": pick_nft_image(it),
+                      "verified": it.get("trust") == "whitelist" or bool(it.get("approved_by"))})
+    return {"items": items, "has_more": len(items) >= 48}
+
 async def check_ton_wallet(address):
+    if not address or not re.fullmatch(r'[A-Za-z0-9_:.\-]{3,100}', address): return False, 0, 0
     try:
         async with aiohttp.ClientSession() as session:
-            url = f"https://tonapi.io/v2/accounts/{address}"
-            async with session.get(url, timeout=5) as resp:
-                if resp.status != 200: return False, 0, 0
-                data = await resp.json()
-                ton_balance = data.get('balance', 0) / 1e9 
-            usdt_url = f"https://tonapi.io/v2/accounts/{address}/jettons"
+            data = await tonapi_get(session, f"/v2/accounts/{address}")
+            if not data: return False, 0, 0
+            ton_balance = int(data.get('balance', 0)) / 1e9
             usdt_balance = 0
-            async with session.get(usdt_url, timeout=5) as resp:
-                if resp.status == 200:
-                    j_data = await resp.json()
-                    for b in j_data.get('balances', []):
-                        if b['jetton']['symbol'] in ['USD₮', 'USDT']:
-                            decimals = b['jetton']['decimals']
-                            usdt_balance = float(b['balance']) / (10**decimals)
-                            break
+            j_data = await tonapi_get(session, f"/v2/accounts/{address}/jettons") or {}
+            for b in j_data.get('balances', []):
+                if b.get('jetton', {}).get('symbol') in ['USD₮', 'USDT']:
+                    usdt_balance = float(b['balance']) / (10 ** int(b['jetton'].get('decimals', 6)))
+                    break
             return True, ton_balance, usdt_balance
     except Exception: return False, 0, 0
 
@@ -602,12 +894,14 @@ async def receive_wallet_address(update: Update, context: ContextTypes.DEFAULT_T
         await edit_custom_msg(chat_id, msg_id, f"عنوان المحفضه خطا ! {FAIL_EMOJI}")
     return ConversationHandler.END
 
+GRAM_WORDS = ['جرام', 'غرام', 'كرام', 'قرام', 'gram', 'تون', 'ton']
+
 def normalize_currency(curr_str):
     curr = curr_str.lower().strip()
     if curr in ['دولار', 'usdt', 'usd', '$']: return 'USD'
     elif curr in ['ماستر', 'master']: return 'IQD'
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: return 'STARS'
-    elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: return 'TON' 
+    elif curr in GRAM_WORDS: return 'TON' 
     elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: return 'BTC'
     elif curr in ['اسيا', 'آسيا', 'asia']: return 'ASIA'
     elif curr in ['باث', 'bath']: return 'BATH'
@@ -634,6 +928,50 @@ def get_daily_trend_emoji(currency, current_price=None):
         return ""
     return ""
 
+BINANCE_HOSTS = ["https://api.binance.com", "https://data-api.binance.vision"]
+BINANCE_SYMBOLS = {'TON': ["GRAMUSDT", "TONUSDT"], 'BTC': ["BTCUSDT"], 'BATH': ["BATHUSDT"]}
+
+async def fetch_binance_ticker(session, symbols, timeout=5):
+    # يرجع (السعر, نسبة التغير 24 ساعة) من اول رمز واول سيرفر يشتغل
+    for symbol in symbols:
+        for host in BINANCE_HOSTS:
+            try:
+                async with session.get(f"{host}/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                    if resp.status == 200:
+                        d = await resp.json()
+                        price = float(d['lastPrice'])
+                        if price > 0: return price, float(d['priceChangePercent'])
+                    elif resp.status == 400: break
+            except Exception: continue
+    return None
+
+async def fetch_tonapi_ton_rate(session):
+    data = await tonapi_get(session, "/v2/rates", {"tokens": "ton", "currencies": "usd"})
+    try: return float(data["rates"]["TON"]["prices"]["USD"])
+    except Exception: return None
+
+def load_price_history():
+    try:
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, dict): return data
+    except Exception: pass
+    return {}
+
+price_history = load_price_history()
+
+def record_price_history(code, value, min_gap=300):
+    # نحفظ نقطة كل 5 دقايق على الاقل ونخلي اخر 30 يوم بس
+    now = time.time()
+    points = price_history.setdefault(code, [])
+    if points and now - points[-1][0] < min_gap: return
+    points.append([int(now), value])
+    cutoff = now - 31 * 86400
+    while points and points[0][0] < cutoff: points.pop(0)
+    try:
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f: json.dump(price_history, f)
+    except Exception: pass
+
 async def fetch_mastercard_price(session):
     try:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
@@ -656,31 +994,22 @@ async def update_prices_if_needed():
     if current_time - last_fetch_time < CACHE_TIME and cached_msg: return True
     try:
         async with aiohttp.ClientSession() as session:
-            crypto_url = 'https://api.binance.com/api/v3/ticker/24hr?symbols=["BTCUSDT","GRAMUSDT"]'
-            crypto_task = session.get(crypto_url, timeout=6)
-            master_task = fetch_mastercard_price(session)
-            response, fetched_iqd = await asyncio.gather(crypto_task, master_task, return_exceptions=True)
-            if not isinstance(response, Exception) and response.status == 200:
-                crypto_data = await response.json()
-                for item in crypto_data:
-                    symbol = item['symbol']
-                    if symbol == 'BTCUSDT':
-                        crypto_prices['BTC'] = float(item['lastPrice'])
-                        crypto_24h_trend['BTC'] = float(item['priceChangePercent'])
-                    elif symbol == 'GRAMUSDT':
-                        crypto_prices['TON'] = float(item['lastPrice'])
-                        crypto_24h_trend['TON'] = float(item['priceChangePercent'])
-            try:
-                bath_url = 'https://api.binance.com/api/v3/ticker/24hr?symbol=BATHUSDT'
-                async with session.get(bath_url, timeout=3) as bath_resp:
-                    if bath_resp.status == 200:
-                        bath_data = await bath_resp.json()
-                        crypto_prices['BATH'] = float(bath_data['lastPrice'])
-                        crypto_24h_trend['BATH'] = float(bath_data['priceChangePercent'])
-                    else: crypto_prices['BATH'] = 0.03
-            except: crypto_prices['BATH'] = 0.03
+            btc_t, ton_t, bath_t, fetched_iqd = await asyncio.gather(
+                fetch_binance_ticker(session, BINANCE_SYMBOLS['BTC']),
+                fetch_binance_ticker(session, BINANCE_SYMBOLS['TON']),
+                fetch_binance_ticker(session, BINANCE_SYMBOLS['BATH'], timeout=3),
+                fetch_mastercard_price(session), return_exceptions=True)
+            for code, ticker in (('BTC', btc_t), ('TON', ton_t), ('BATH', bath_t)):
+                if isinstance(ticker, tuple):
+                    crypto_prices[code], crypto_24h_trend[code] = ticker
+            if not crypto_prices.get('TON'):
+                ton_rate = await fetch_tonapi_ton_rate(session)
+                if ton_rate: crypto_prices['TON'] = ton_rate
+            if not crypto_prices.get('BATH'): crypto_prices['BATH'] = 0.03
 
-            if isinstance(fetched_iqd, int) and fetched_iqd > 0: last_known_iqd = fetched_iqd
+            if isinstance(fetched_iqd, int) and fetched_iqd > 0:
+                last_known_iqd = fetched_iqd
+                record_price_history('IQD', last_known_iqd)
             today_str = datetime.now().strftime('%Y-%m-%d')
             if daily_iqd['date'] != today_str:
                 daily_iqd['date'] = today_str
@@ -729,7 +1058,7 @@ def generate_conversion_msg(amount, currency_str):
         usd_val = value_in_master / (last_known_iqd / 100)
     elif curr in ['باث', 'bath']: base, name, usd_val = 'BATH', f"{BATH_EMOJI} باث (BATH)", amount * crypto_prices.get('BATH', 0.03)
     elif curr in ['نجمه', 'نجمة', 'نجوم', 'star', 'stars', 'نج']: base, name, usd_val = 'STARS', '<tg-emoji emoji-id="5951912004590507793">⭐️</tg-emoji> نجوم', amount * 0.015 
-    elif curr in ['جرام', 'غرام', 'كرام', 'قرام', 'gram']: base, name, usd_val = 'TON', "جرام (GRAM)", amount * crypto_prices.get('TON', 0)
+    elif curr in GRAM_WORDS: base, name, usd_val = 'TON', "جرام (GRAM)", amount * crypto_prices.get('TON', 0)
     elif curr in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin']: base, name, usd_val = 'BTC', "بتكوين (BTC)", amount * crypto_prices.get('BTC', 0)
     else: return f"عذراً، العملة غير مدعومة. {WARN_EMOJI}"
 
@@ -755,6 +1084,224 @@ def generate_conversion_msg(amount, currency_str):
     msg += f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>'
     return msg
 
+CHART_TIMEFRAMES = {
+    "1d": {"interval": "30m", "limit": 48, "seconds": 86400, "ar": "24 ساعة", "en": "24H"},
+    "7d": {"interval": "4h", "limit": 42, "seconds": 7 * 86400, "ar": "7 أيام", "en": "7D"},
+    "30d": {"interval": "1d", "limit": 30, "seconds": 30 * 86400, "ar": "30 يوم", "en": "30D"},
+}
+CHART_ASSETS = {
+    'TON': {"en": "GRAM / USDT", "ar": "الجرام", "emoji": GRAM_EMOJI},
+    'BTC': {"en": "BTC / USDT", "ar": "البتكوين", "emoji": '<tg-emoji emoji-id="5292058354791756351">🪙</tg-emoji>'},
+    'BATH': {"en": "BATH / USDT", "ar": "الباث", "emoji": BATH_EMOJI},
+    'IQD': {"en": "MASTER  ·  100 USD / IQD", "ar": "الماستر (100$)", "emoji": MASTER_EMOJI},
+    'ASIA': {"en": "ASIA  ·  100 USD / IQD", "ar": "اسيا (100$)", "emoji": ASIA_EMOJI},
+}
+CHART_TRIGGER_RE = re.compile(r'^/?(?:ال)?(?:مؤشر|موشر|شارت|چارت|جارت|chart)(?:\s+(?:ال)?(.+))?$')
+CHART_WORDS = {w: 'TON' for w in GRAM_WORDS + ['الجرام', 'التون']}
+CHART_WORDS.update({w: 'BTC' for w in ['بتكوين', 'بيتكوين', 'btc', 'bitcoin', 'البتكوين']})
+CHART_WORDS.update({w: 'IQD' for w in ['ماستر', 'master', 'الماستر']})
+CHART_WORDS.update({w: 'ASIA' for w in ['اسيا', 'آسيا', 'asia']})
+CHART_WORDS.update({w: 'BATH' for w in ['باث', 'bath']})
+chart_cache = {}
+chart_lock = threading.Lock()
+
+async def fetch_binance_klines(session, symbols, interval, limit):
+    for symbol in symbols:
+        for host in BINANCE_HOSTS:
+            try:
+                async with session.get(f"{host}/api/v3/klines", params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                    if resp.status == 200:
+                        rows = await resp.json()
+                        candles = [(int(r[0]) // 1000, float(r[1]), float(r[2]), float(r[3]), float(r[4])) for r in rows]
+                        if len(candles) >= 2: return candles
+                    elif resp.status == 400: break
+            except Exception: continue
+    return None
+
+async def get_chart_series(code, tf):
+    frame = CHART_TIMEFRAMES[tf]
+    if code in BINANCE_SYMBOLS:
+        async with aiohttp.ClientSession() as session:
+            candles = await fetch_binance_klines(session, BINANCE_SYMBOLS[code], frame["interval"], frame["limit"])
+            if candles: return {"kind": "candle", "data": candles}
+            if code == 'TON':
+                # بديل اذا بايننس ما اشتغل: شارت tonapi
+                end = int(time.time())
+                data = await tonapi_get(session, "/v2/rates/chart", {"token": "ton", "currency": "usd", "start_date": end - frame["seconds"], "end_date": end, "points_count": 96})
+                points = sorted((int(p[0]), float(p[1])) for p in (data or {}).get("points", []) if len(p) >= 2)
+                if len(points) >= 2: return {"kind": "line", "data": points}
+        return None
+    if code in ('IQD', 'ASIA'):
+        cutoff = time.time() - frame["seconds"]
+        points = [(int(t), float(v)) for t, v in price_history.get('IQD', []) if t >= cutoff]
+        if len(points) < 2 or points[-1][0] - points[0][0] < 3600: return None
+        if code == 'ASIA': points = [(t, v / 0.9) for t, v in points]
+        return {"kind": "line", "data": points}
+    return None
+
+def format_chart_price(code, value):
+    if code in ('IQD', 'ASIA'): return f"{value:,.0f}"
+    if code == 'BTC': return f"{value:,.0f}"
+    if value >= 1: return f"{value:,.3f}"
+    return f"{value:,.5f}"
+
+def render_chart_png(code, tf, series, watermark=""):
+    import io
+    from matplotlib.figure import Figure
+    from matplotlib.patches import Rectangle
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+
+    bg, panel, grid, text, muted = "#0b0f17", "#111827", "#1f2937", "#f3f4f6", "#9ca3af"
+    up_c, down_c = "#22c55e", "#ef4444"
+    data = series["data"]
+    times = [d[0] for d in data]
+    if series["kind"] == "candle":
+        first, last = data[0][1], data[-1][4]
+        high, low = max(d[2] for d in data), min(d[3] for d in data)
+    else:
+        first, last = data[0][1], data[-1][1]
+        high, low = max(d[1] for d in data), min(d[1] for d in data)
+    change = ((last - first) / first * 100) if first else 0
+    main_c = up_c if change >= 0 else down_c
+
+    fig = Figure(figsize=(10, 5.6), dpi=110, facecolor=bg)
+    ax = fig.add_axes([0.04, 0.12, 0.84, 0.62], facecolor=panel)
+    for spine in ax.spines.values(): spine.set_visible(False)
+    ax.grid(True, color=grid, linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.tick_params(colors=muted, labelsize=9, length=0)
+    ax.yaxis.tick_right()
+    ax.yaxis.set_major_locator(MaxNLocator(6))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: format_chart_price(code, v)))
+
+    xs = list(range(len(data)))
+    if series["kind"] == "candle":
+        for x, (_, o, h, l, c) in zip(xs, data):
+            col = up_c if c >= o else down_c
+            ax.vlines(x, l, h, color=col, linewidth=1.1, zorder=2)
+            body_low, body_h = min(o, c), max(abs(c - o), (high - low) * 0.002)
+            ax.add_patch(Rectangle((x - 0.32, body_low), 0.64, body_h, facecolor=col, edgecolor=col, zorder=3))
+        ax.set_xlim(-1, len(data) + 0.5)
+    else:
+        ys = [d[1] for d in data]
+        ax.plot(xs, ys, color=main_c, linewidth=2.2, zorder=3)
+        ax.fill_between(xs, ys, min(ys) - (high - low) * 0.08, color=main_c, alpha=0.12, zorder=2)
+        ax.set_xlim(-0.5, len(data) - 0.5)
+    pad = (high - low) * 0.12 or abs(last) * 0.01 or 1
+    ax.set_ylim(low - pad, high + pad)
+
+    # خط السعر الحالي مع علامة
+    ax.axhline(last, color=main_c, linestyle=(0, (4, 4)), linewidth=1, alpha=0.8, zorder=1)
+    ax.annotate(format_chart_price(code, last), xy=(1, last), xycoords=("axes fraction", "data"), xytext=(4, 0), textcoords="offset points",
+                va="center", ha="left", fontsize=9, fontweight="bold", color="white",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor=main_c, edgecolor="none"), annotation_clip=False, zorder=5)
+
+    fmt = "%H:%M" if tf == "1d" else "%d/%m"
+    step = max(1, len(data) // 6)
+    ticks = xs[::step]
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([datetime.fromtimestamp(times[i], IRAQ_TZ).strftime(fmt) for i in ticks])
+
+    asset, frame = CHART_ASSETS[code], CHART_TIMEFRAMES[tf]
+    prefix = "" if code in ('IQD', 'ASIA') else "$"
+    arrow = "▲" if change >= 0 else "▼"
+    fig.text(0.04, 0.9, asset["en"], color=muted, fontsize=13, fontweight="bold")
+    price_txt = fig.text(0.04, 0.8, f"{prefix}{format_chart_price(code, last)}", color=text, fontsize=26, fontweight="bold")
+    # نحط نسبة التغير بعد السعر مباشرة مهما كان طوله
+    price_end = price_txt.get_window_extent(FigureCanvasAgg(fig).get_renderer()).x1 / fig.bbox.width
+    fig.text(price_end + 0.025, 0.815, f" {arrow} {change:+.2f}% ", color="white", fontsize=12, fontweight="bold",
+             bbox=dict(boxstyle="round,pad=0.35", facecolor=main_c, edgecolor="none"))
+    fig.text(0.88, 0.9, frame["en"], color=text, fontsize=13, fontweight="bold", ha="right",
+             bbox=dict(boxstyle="round,pad=0.35", facecolor=grid, edgecolor="none"))
+    fig.text(0.88, 0.81, f"H  {prefix}{format_chart_price(code, high)}", color=up_c, fontsize=10, ha="right")
+    fig.text(0.88, 0.765, f"L  {prefix}{format_chart_price(code, low)}", color=down_c, fontsize=10, ha="right")
+    if watermark:
+        fig.text(0.46, 0.43, watermark, color="white", alpha=0.05, fontsize=34, fontweight="bold", ha="center", va="center")
+    fig.text(0.04, 0.035, datetime.now(IRAQ_TZ).strftime("Updated %Y-%m-%d %H:%M (Baghdad)"), color=muted, fontsize=8)
+
+    buf = io.BytesIO()
+    with chart_lock:
+        fig.savefig(buf, format="png", facecolor=bg)
+    return buf.getvalue(), {"last": last, "high": high, "low": low, "change": change}
+
+def build_chart_caption(code, tf, stats):
+    asset, frame = CHART_ASSETS[code], CHART_TIMEFRAMES[tf]
+    unit = " IQD" if code in ('IQD', 'ASIA') else ""
+    prefix = "" if code in ('IQD', 'ASIA') else "$"
+    trend = UP_EMOJI if stats["change"] > 0 else (DOWN_EMOJI if stats["change"] < 0 else "")
+    state = "صعود" if stats["change"] > 0 else ("نزول" if stats["change"] < 0 else "ثابت")
+    return (f"{asset['emoji']} <b>مؤشر {asset['ar']}</b> — {frame['ar']}\n\n"
+            f"💵 السعر الحالي: <b>{prefix}{format_chart_price(code, stats['last'])}{unit}</b>\n"
+            f"📊 الحركة: <b>{state} {stats['change']:+.2f}%</b> {trend}\n"
+            f"🔺 أعلى: <b>{prefix}{format_chart_price(code, stats['high'])}</b>   🔻 أدنى: <b>{prefix}{format_chart_price(code, stats['low'])}</b>\n\n"
+            f'Dev : <tg-emoji emoji-id="4949843327810798325">👨‍💻</tg-emoji> | <b>الروسي</b>')
+
+def chart_buttons(code, tf):
+    row = [{"text": CHART_TIMEFRAMES[k]["ar"], "callback_data": f"chart|{code}|{k}", "style": "success" if k == tf else "primary"} for k in CHART_TIMEFRAMES]
+    return [row]
+
+async def make_chart(code, tf, watermark=""):
+    cached = chart_cache.get((code, tf))
+    if cached and time.time() - cached[0] < 60: return cached[1], cached[2]
+    series = await get_chart_series(code, tf)
+    if not series: return None, None
+    png, stats = await asyncio.to_thread(render_chart_png, code, tf, series, watermark)
+    caption = build_chart_caption(code, tf, stats)
+    chart_cache[(code, tf)] = (time.time(), png, caption)
+    return png, caption
+
+async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, code, tf="1d"):
+    chat_id, msg_id = update.message.chat_id, update.message.message_id
+    try:
+        png, caption = await make_chart(code, tf, f"@{context.bot.username}" if context.bot.username else "")
+    except Exception as e:
+        logging.warning(f"chart error {code}: {e}")
+        png, caption = None, None
+    if png and await send_photo_msg(chat_id, png, caption, msg_id, extra_buttons=chart_buttons(code, tf)):
+        return
+    # اذا المؤشر ما متوفر نرجع رسالة السعر العادية حتى المستخدم ياخذ جواب دائماً
+    await update_prices_if_needed()
+    if code in ('IQD', 'ASIA'):
+        value = last_known_iqd if code == 'IQD' else int(last_known_iqd / 0.9)
+        msg = (f"{CHART_ASSETS[code]['emoji']} <b>{CHART_ASSETS[code]['ar']}</b>: <b>{value:,}</b> IQD {get_daily_trend_emoji('IQD', last_known_iqd)}\n\n"
+               f"<i>مؤشر {CHART_ASSETS[code]['ar']} يتجهز بعد ما البوت يجمع أسعار كافية {WAIT_EMOJI}</i>")
+        await send_custom_msg(chat_id, msg, msg_id)
+    else:
+        await send_custom_msg(chat_id, cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}", msg_id)
+
+async def chart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id in banned_users:
+        await query.answer("انت محظور من البوت 🚫", show_alert=True)
+        return
+    try: _, code, tf = query.data.split("|")
+    except ValueError:
+        await query.answer()
+        return
+    if code not in CHART_ASSETS or tf not in CHART_TIMEFRAMES:
+        await query.answer()
+        return
+    await query.answer(f"جاري تحميل مؤشر {CHART_TIMEFRAMES[tf]['ar']}... ⏳")
+    try:
+        png, caption = await make_chart(code, tf, f"@{context.bot.username}" if context.bot.username else "")
+    except Exception as e:
+        logging.warning(f"chart error {code}: {e}")
+        png = None
+    if not png:
+        await query.answer("المؤشر غير متوفر حالياً، حاول بعد شوية", show_alert=True)
+        return
+    await edit_photo_msg(query.message.chat.id, query.message.message_id, png, caption, extra_buttons=chart_buttons(code, tf))
+
+def detect_chart_request(text):
+    if text in CHART_WORDS: return CHART_WORDS[text]
+    m = CHART_TRIGGER_RE.match(text)
+    if m:
+        target = (m.group(1) or "").strip()
+        code = CHART_WORDS.get(target) or CHART_WORDS.get("ال" + target) or normalize_currency(target)
+        return code if code in CHART_ASSETS else 'TON'
+    return None
+
 async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     msg = f"{WHALE_BELL} <b>نظام التنبيهات الذكي</b>\n\nاختر نوع التنبيه الذي تريده:"
@@ -763,7 +1310,7 @@ async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [{"text": "نبهني هدايا (صيد الرخيص)", "callback_data": "alert_gifts_toggle", "style": "success", "icon_custom_emoji_id": "5255980157058975232"}],
         CANCEL_BTN
     ]
-    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn, skip_news=True)
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn)
     return ASK_ALERT_TYPE
 
 async def alert_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -771,31 +1318,28 @@ async def alert_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     data = query.data
     if data == "alert_currency_start":
-        await edit_custom_msg(query.message.chat.id, query.message.message_id, "اكتب اسم العملة اللي تريد أراقبها (مثال: جرام، بتكوين، باث، ماستر...):", extra_buttons=[CANCEL_BTN], skip_news=True)
+        await edit_custom_msg(query.message.chat.id, query.message.message_id, "اكتب اسم العملة اللي تريد أراقبها (مثال: جرام، بتكوين، باث، ماستر...):", extra_buttons=[CANCEL_BTN])
         return ASK_CURRENCY_NAME
     elif data == "alert_gifts_toggle":
         user_id = query.from_user.id
         if user_id in gift_alert_users:
             msg = f"أنت مفعل تنبيهات صيد الهدايا بالفعل! 🎯\nهل تريد إيقافها؟"
             btn = [[{"text": "إيقاف صيد الهدايا", "callback_data": "stop_gift_alerts", "style": "danger", "icon_custom_emoji_id": "5215204871422093648"}], CANCEL_BTN]
-            await edit_custom_msg(query.message.chat.id, query.message.message_id, msg, extra_buttons=btn, skip_news=True)
+            await edit_custom_msg(query.message.chat.id, query.message.message_id, msg, extra_buttons=btn)
             return ASK_ALERT_TYPE
         else:
             gift_alert_users[user_id] = {"name": html.escape(query.from_user.first_name), "chat_id": query.message.chat.id}
-            await edit_custom_msg(query.message.chat.id, query.message.message_id, f"✅ <b>تم تسجيلك في صيد الهدايا!</b>\n\nسيقوم البوت بمراقبة سوق (مركت) وإشعارك فور نزول هدية أرخص من الفلور بنسبة 6% أو أكثر.", skip_news=True)
+            await edit_custom_msg(query.message.chat.id, query.message.message_id, f"✅ <b>تم تسجيلك في صيد الهدايا!</b>\n\nسيقوم البوت بمراقبة سوق (مركت) وإشعارك فور نزول هدية أرخص من الفلور بنسبة 6% أو أكثر.")
         return ConversationHandler.END
     elif data == "stop_gift_alerts":
         user_id = query.from_user.id
         if user_id in gift_alert_users: del gift_alert_users[user_id]
-        await edit_custom_msg(query.message.chat.id, query.message.message_id, f"تم إلغاء تفعيل تنبيهات صيد الهدايا بنجاح {SUCCESS_EMOJI}", skip_news=True)
+        await edit_custom_msg(query.message.chat.id, query.message.message_id, f"تم إلغاء تفعيل تنبيهات صيد الهدايا بنجاح {SUCCESS_EMOJI}")
         return ConversationHandler.END
 
 async def alert_currency_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     curr_input = html.escape(update.message.text.strip())
-    if re.search(r'(^|\s)(تون|ton)(\s|$)', curr_input.lower()):
-        await send_custom_msg(update.message.chat_id, f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}", update.message.message_id)
-        return ASK_CURRENCY_NAME
     curr_code = normalize_currency(curr_input)
     if not curr_code:
         await send_custom_msg(update.message.chat_id, f"عذراً، العملة غير مدعومة. يرجى كتابة اسم عملة صحيح: {WARN_EMOJI}", update.message.message_id, extra_buttons=[CANCEL_BTN])
@@ -883,43 +1427,36 @@ async def toggle_whale_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def check_whales_loop(app: Application):
     last_tx_hash = ""
+    wallet = "EQBX63RAdgShnrJGptNINn2uUFIqEQ9_hD0z4E7h-gH-Zk5t"
     while True:
-        await asyncio.sleep(20) 
+        await asyncio.sleep(20)
         if not whale_alert_users: continue
         try:
-            wallet = "EQBX63RAdgShnrJGptNINn2uUFIqEQ9_hD0z4E7h-gH-Zk5t" 
-            url = f"https://tonapi.io/v2/accounts/{wallet}/events?limit=10"
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        events = data.get('events', [])
-                        if not events: continue
-                        new_latest_hash = events[0].get('event_id')
-                        if last_tx_hash == "":
-                            last_tx_hash = new_latest_hash
-                            continue
-                        for event in events:
-                            tx_hash = event.get('event_id')
-                            if tx_hash == last_tx_hash: break 
-                            for action in event.get('actions', []):
-                                if action.get('type') == 'TonTransfer':
-                                    ton_transfer_data = action.get('TonTransfer', {})
-                                    amount = float(ton_transfer_data.get('amount', 0)) / 1e9
-                                    if amount >= 8000:
-                                        grouped_by_chat = {}
-                                        for uid, udata in whale_alert_users.items():
-                                            cid = udata['chat_id']
-                                            if cid not in grouped_by_chat: grouped_by_chat[cid] = []
-                                            grouped_by_chat[cid].append({'id': uid, 'name': udata['name']})
-                                        for cid, users in grouped_by_chat.items():
-                                            mentions = " ".join([f"<a href='tg://user?id={u['id']}'>{u['name']}</a>" for u in users])
-                                            msg = (f"يا : {mentions} {WHALE_BELL}\n\n"
-                                                   f"حصلت عملية تحويل بقيمه {amount:,.0f} جرام {WHALE_EMOJI}\n\n"
-                                                   f"هل صعود {UP_EMOJI}؟ او نزول {DOWN_EMOJI}؟")
-                                            await send_custom_msg(cid, msg)
-                        last_tx_hash = new_latest_hash
-        except Exception: pass 
+                data = await tonapi_get(session, f"/v2/accounts/{wallet}/events", {"limit": 10})
+            events = (data or {}).get('events', [])
+            if not events: continue
+            new_latest_hash = events[0].get('event_id')
+            if last_tx_hash == "":
+                last_tx_hash = new_latest_hash
+                continue
+            for event in events:
+                if event.get('event_id') == last_tx_hash: break
+                for action in event.get('actions', []):
+                    if action.get('type') != 'TonTransfer': continue
+                    amount = float(action.get('TonTransfer', {}).get('amount', 0)) / 1e9
+                    if amount < 8000: continue
+                    grouped_by_chat = {}
+                    for uid, udata in list(whale_alert_users.items()):
+                        grouped_by_chat.setdefault(udata['chat_id'], []).append({'id': uid, 'name': udata['name']})
+                    for cid, users in grouped_by_chat.items():
+                        mentions = " ".join([f"<a href='tg://user?id={u['id']}'>{u['name']}</a>" for u in users])
+                        msg = (f"يا : {mentions} {WHALE_BELL}\n\n"
+                               f"حصلت عملية تحويل بقيمه {amount:,.0f} جرام {WHALE_EMOJI}\n\n"
+                               f"هل صعود {UP_EMOJI}؟ او نزول {DOWN_EMOJI}؟")
+                        await send_custom_msg(cid, msg)
+            last_tx_hash = new_latest_hash
+        except Exception: pass
 
 async def check_alerts_loop(app: Application):
     global alerts_db 
@@ -954,7 +1491,7 @@ async def check_alerts_loop(app: Application):
 async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     msg = f"<tg-emoji emoji-id='5231200819986047254'>📊</tg-emoji> <b>حاسبة الأرباح والخسائر الذكية</b>\n\nأرسل اسم العملة التي اشتريتها (مثال: جرام، بتكوين، باث، ماستر...):"
-    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN], skip_news=True)
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN])
     return ASK_CALC_CURRENCY
 
 async def calc_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -967,7 +1504,7 @@ async def calc_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['calc_curr'] = curr_code
     context.user_data['calc_curr_name'] = curr_input
     msg = f"{SUCCESS_EMOJI} تم اختيار: <b>{curr_input}</b>\n\nالآن أرسل <b>سعر الشراء</b> (السعر الذي اشتريت به القطعة الواحدة):"
-    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN], skip_news=True)
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN])
     return ASK_CALC_PRICE
 
 async def calc_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -984,7 +1521,7 @@ async def calc_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             purchase_price *= multiplier_map[match.group(2)]
         context.user_data['calc_price'] = purchase_price
         msg = f"{SUCCESS_EMOJI} سعر الشراء: <b>{format_large_amount(purchase_price)}</b>\n\nأخيراً، أرسل <b>الكمية</b> (كم قطعة اشتريت؟):"
-        await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN], skip_news=True)
+        await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=[CANCEL_BTN])
         return ASK_CALC_AMOUNT
     except: return ASK_CALC_PRICE
 
@@ -1046,6 +1583,14 @@ async def post_init(app: Application):
     asyncio.create_task(tonnel_websocket_loop()) 
     asyncio.create_task(floor_updater_loop())
     asyncio.create_task(mrkt_updater_loop())
+    asyncio.create_task(price_history_loop())
+
+async def price_history_loop():
+    # يجمع سعر الماستر كل 5 دقايق حتى يشتغل مؤشر الماستر واسيا
+    while True:
+        try: await update_prices_if_needed()
+        except Exception: pass
+        await asyncio.sleep(300)
 
 def resolve_gift_name_mrkt(search_term):
     if not search_term: return ""
@@ -1070,17 +1615,17 @@ async def gift_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
            [{"text": "بحث في تونيل", "callback_data": "search_tonnel", "style": "danger", "icon_custom_emoji_id": TONNEL_ICON_ID}],
            [{"text": "الغاء", "callback_data": "cancel", "style": "primary", "icon_custom_emoji_id": "5440681540541502133"},
             {"text": "اخبار الهدايا", "url": "https://t.me/Guidance_nft", "style": "danger", "icon_custom_emoji_id": "5224257782013769471"}]]
-    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn, skip_news=True)
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn)
     return ASK_MARKET_CHOICE
 
 async def handle_market_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == "search_tonnel":
-        await edit_custom_msg(query.message.chat.id, query.message.message_id, f"{TONNEL_ICON_ID} أرسل اسم الهدية للبحث في <b>تونيل</b>:", extra_buttons=[CANCEL_BTN], skip_news=True)
+        await edit_custom_msg(query.message.chat.id, query.message.message_id, f"{TONNEL_TEXT_EMOJI} أرسل اسم الهدية للبحث في <b>تونيل</b>:", extra_buttons=[CANCEL_BTN])
         return ASK_GIFT_SEARCH_TONNEL
     elif query.data == "search_mrkt":
-        await edit_custom_msg(query.message.chat.id, query.message.message_id, f"{MRKT_TEXT_EMOJI} أرسل اسم الهدية للبحث في <b>مركت</b>:", extra_buttons=[CANCEL_BTN], skip_news=True)
+        await edit_custom_msg(query.message.chat.id, query.message.message_id, f"{MRKT_TEXT_EMOJI} أرسل اسم الهدية للبحث في <b>مركت</b>:", extra_buttons=[CANCEL_BTN])
         return ASK_GIFT_SEARCH_MRKT
 
 async def perform_gift_search_tonnel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1091,7 +1636,7 @@ async def perform_gift_search_tonnel(update: Update, context: ContextTypes.DEFAU
         if match: search_query = match.group(1).replace('-', ' ')
     search_query = re.sub(r'-\d+$', '', search_query).strip()
     clean_compare = search_query.replace(' ', '')
-    msg_wait = await send_custom_msg(update.message.chat_id, f"جاري البحث في تونيل عن <b>{search_query}</b>... {SEARCH_EMOJI}", update.message.message_id)
+    msg_wait = await send_custom_msg(update.message.chat_id, f"جاري البحث في تونيل عن <b>{html.escape(search_query)}</b>... {SEARCH_EMOJI}", update.message.message_id)
     
     found_price, found_name, found_gift_id, found_gift_num = None, search_query, None, None
     for gift_id, data in active_listings.items():
@@ -1115,7 +1660,7 @@ async def perform_gift_search_tonnel(update: Update, context: ContextTypes.DEFAU
         btn = []
         if found_gift_id: btn.append([{"text": "عرض في Tonnel", "url": f"https://t.me/tonnel_network_bot/gift?startapp={found_gift_id}", "style": "success", "icon_custom_emoji_id": TONNEL_ICON_ID}])
         btn.append([{"text": "عرض في تيليجرام", "url": f"https://t.me/nft/{clean_url_name}-{found_gift_num}" if found_gift_num else f"https://t.me/nft/{clean_url_name}", "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}])
-        await edit_custom_msg(update.message.chat_id, msg_wait, f"{GIFT_FLOOR_EMOJI} نتيجة البحث في تونيل:\nالهدية: <b>{found_name}</b>\nأقل سعر: <b>{format_exact_price(found_price)}</b> {GRAM_EMOJI}", extra_buttons=btn)
+        await edit_custom_msg(update.message.chat_id, msg_wait, f"{GIFT_FLOOR_EMOJI} نتيجة البحث في تونيل:\nالهدية: <b>{html.escape(str(found_name))}</b>\nأقل سعر: <b>{format_exact_price(found_price)}</b> {GRAM_EMOJI}", extra_buttons=btn)
     else:
         await edit_custom_msg(update.message.chat_id, msg_wait, f"عذراً، لم أتمكن من العثور على الهدية في تونيل. {FAIL_EMOJI}")
     return ConversationHandler.END
@@ -1123,7 +1668,7 @@ async def perform_gift_search_tonnel(update: Update, context: ContextTypes.DEFAU
 async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     raw_query = update.message.text.strip()
-    msg_wait = await send_custom_msg(update.message.chat_id, f"جاري البحث في مركت عن <b>{raw_query}</b>... {SEARCH_EMOJI}", update.message.message_id)
+    msg_wait = await send_custom_msg(update.message.chat_id, f"جاري البحث في مركت عن <b>{html.escape(raw_query)}</b>... {SEARCH_EMOJI}", update.message.message_id)
     global mrkt_token, mrkt_http
     if not mrkt_token: mrkt_token = await get_mrkt_auth_token()
     if not mrkt_token or not mrkt_http:
@@ -1161,7 +1706,7 @@ async def perform_gift_search_mrkt(update: Update, context: ContextTypes.DEFAULT
             gift_num = found_gift.get("number")
             clean_url_name = gift_name.lower().replace(' ', '').replace('’', '').replace("'", "")
             btn.append([{"text": "عرض في تيليجرام", "url": f"https://t.me/nft/{clean_url_name}-{gift_num}" if gift_num else f"https://t.me/nft/{clean_url_name}", "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}])
-            await edit_custom_msg(update.message.chat_id, msg_wait, f"{MRKT_TEXT_EMOJI} نتيجة البحث في مركت:\nالهدية: <b>{gift_name}</b>\nأقل سعر: <b>{format_exact_price(ton_price)}</b> {GRAM_EMOJI}", extra_buttons=btn)
+            await edit_custom_msg(update.message.chat_id, msg_wait, f"{MRKT_TEXT_EMOJI} نتيجة البحث في مركت:\nالهدية: <b>{html.escape(str(gift_name))}</b>\nأقل سعر: <b>{format_exact_price(ton_price)}</b> {GRAM_EMOJI}", extra_buttons=btn)
             return ConversationHandler.END
     await edit_custom_msg(update.message.chat_id, msg_wait, f"عذراً، لم أتمكن من العثور على الهدية في مركت. {FAIL_EMOJI}")
     return ConversationHandler.END
@@ -1172,9 +1717,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id, user_id, msg_id = update.message.chat_id, update.message.from_user.id, update.message.message_id
     await track_new_user(update.effective_user, context)
     if await is_user_banned(update, context): return
+    address = find_ton_address(update.message.text)
+    if address:
+        await handle_wallet_address(update, context, address)
+        return
     if any(word in text.split() for word in ["الو", "يا", "بوت", "شلونك", "منو", "اسمع"]): return
-    if re.search(r'(^|\s)(تون|ton)(\s|$)', text):
-        await send_custom_msg(chat_id, f"ياغبي التون صار اسمه جرام\nيله اكتب الامر بالجرام علمود ارد عليك {FOOL_EMOJI}", reply_to_message_id=msg_id)
+    chart_code = detect_chart_request(text.lstrip('/'))
+    if chart_code:
+        await send_chart(update, context, chart_code)
         return
     if text in ["الاوامر", "اوامر"]:
         msg = f"اهلا بك في قائمه اوامر البوت {CLIPBOARD_EMOJI}\n\n"
@@ -1187,6 +1737,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f'<tg-emoji emoji-id="5411597774359653692">🔍</tg-emoji> <b>بحث هدية</b>: للبحث عن ارخص سعر لهدية معينة {END_EMOJIS}\n'
         msg += f'<tg-emoji emoji-id="5231200819986047254">📊</tg-emoji> <b>حاسبه</b>: لحساب أرباحك وخسائرك في العملات {END_EMOJIS}\n'
         msg += f'📱 <b>تحويل</b>: للتعرف على طريقة تحويل رصيد اسياسيل بسهولة {END_EMOJIS}\n'
+        msg += f'{UP_EMOJI} <b>مؤشر</b>: صورة مؤشر صعود ونزول الجرام (او اكتب: جرام، بتكوين، ماستر، اسيا) {END_EMOJIS}\n'
+        msg += f'{SEARCH_EMOJI} <b>ارسل اي عنوان محفظة</b>: يطلعلك رصيدها وآخر تحويل وعدد المقتنيات وأنشطتها {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
     if text == "تفعيل التنبيهات":
@@ -1238,7 +1790,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     if text in ["رصيده", "/رصيده"]:
-        if update.message.reply_to_message:
+        if update.message.reply_to_message and update.message.reply_to_message.from_user:
             target_id, target_name = update.message.reply_to_message.from_user.id, html.escape(update.message.reply_to_message.from_user.first_name)
             if target_id not in user_wallets: await send_custom_msg(chat_id, f"المستخدم <b>{target_name}</b> لم يقم بربط محفظته بالبوت {WARN_EMOJI}", reply_to_message_id=msg_id)
             else:
@@ -1252,7 +1804,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=[[{"text": "تغيير محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]])
         return
 
-    calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(?:(\d+(?:\.\d+)?)\s*)?(الف|مليون|بليون|مليار|ترليون|كوادرليون)?\s*(جرام|غرام|كرام|قرام|gram|دولار|usdt|usd|\$|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)(?:\s|$)', text)
+    calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(?:(\d+(?:\.\d+)?)\s*)?(الف|مليون|بليون|مليار|ترليون|كوادرليون)?\s*(جرام|غرام|كرام|قرام|gram|تون|ton|دولار|usdt|usd|\$|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)(?:\s|$)', text)
     if calc_match and (calc_match.group(1) or calc_match.group(2)):
         amount_str = calc_match.group(1)
         amount = float(amount_str) if amount_str else 1.0
@@ -1269,9 +1821,43 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     print(f"⚠️ ظهر خطأ بالبوت: {context.error}")
 
 web_app = Flask(__name__)
+WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
+
 @web_app.route('/')
 def home(): return "البوت شغال بقوة 🔥"
-def run_web(): web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
+@web_app.route('/app')
+def wallet_app(): return send_from_directory(WEBAPP_DIR, "wallet.html")
+
+def api_response(data, status=200):
+    resp = jsonify(data)
+    resp.status_code = status
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+@web_app.route('/api/wallet/<address>')
+def api_wallet(address):
+    if not is_valid_ton_address(address): return api_response({"error": "invalid_address"}, 400)
+    try: data = asyncio.run(fetch_wallet_summary(address))
+    except Exception: data = None
+    return api_response(data) if data else api_response({"error": "unavailable"}, 502)
+
+@web_app.route('/api/wallet/<address>/events')
+def api_wallet_events(address):
+    if not is_valid_ton_address(address): return api_response({"error": "invalid_address"}, 400)
+    before_lt = request.args.get("before_lt", "")
+    try: data = asyncio.run(fetch_wallet_events(address, int(before_lt) if before_lt.isdigit() else None))
+    except Exception: data = None
+    return api_response(data) if data is not None else api_response({"error": "unavailable"}, 502)
+
+@web_app.route('/api/wallet/<address>/nfts')
+def api_wallet_nfts(address):
+    if not is_valid_ton_address(address): return api_response({"error": "invalid_address"}, 400)
+    offset = request.args.get("offset", "0")
+    try: data = asyncio.run(fetch_wallet_nfts(address, min(int(offset), 100000) if offset.isdigit() else 0))
+    except Exception: data = None
+    return api_response(data) if data is not None else api_response({"error": "unavailable"}, 502)
+def run_web(): web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 7860)), threaded=True)
 
 def main():
     threading.Thread(target=run_web, daemon=True).start()
@@ -1331,6 +1917,7 @@ def main():
     
     app.add_handler(CommandHandler("reset", reset_market_cmd))
     app.add_handler(CallbackQueryHandler(handle_reset_callback, pattern="^reset_"))
+    app.add_handler(CallbackQueryHandler(chart_callback, pattern=r"^chart\|"))
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
@@ -1338,7 +1925,7 @@ def main():
     app.add_error_handler(error_handler)
     
     print("--- البوت شغال الآن ومستعد للعمل ---")
-    app.run_polling(drop_pending_updates=True, bootstrap_retries=10)
+    app.run_polling(drop_pending_updates=True, bootstrap_retries=10, allowed_updates=["message", "callback_query", "my_chat_member"])
 
 if __name__ == "__main__":
     main()

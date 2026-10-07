@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+tonnel_db.json
+price_history.json
+*.session
