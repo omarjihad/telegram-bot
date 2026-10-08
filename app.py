@@ -56,6 +56,8 @@ bot_users = set()
 whale_alert_users = {} 
 banned_users = set() 
 user_mapping = {} 
+user_names = {}
+chat_seen = {}
 wallet_watches = []
 gift_price_alerts = []
 
@@ -281,11 +283,11 @@ async def mrkt_cheapest(name, model=None, ttl=120):
     if len(mrkt_floor_cache) > 2000: mrkt_floor_cache.clear()
     return items
 
-async def gift_floor_now(name, model=None):
+async def gift_floor_now(name, model=None, ttl=120):
     # افضل سعر فلور نعرفه: مركت (للموديل اذا موجود) او تونيل
-    items = await mrkt_cheapest(name, model) if model else None
+    items = await mrkt_cheapest(name, model, ttl=ttl) if model else None
     if items: return items[0][0], "MRKT", items[0][1]
-    items = await mrkt_cheapest(name)
+    items = await mrkt_cheapest(name, ttl=ttl)
     tonnel = tonnel_floor_for(name)
     mrkt_price = items[0][0] if items else 0
     if mrkt_price and (not tonnel or mrkt_price <= tonnel): return mrkt_price, "MRKT", items[0][1]
@@ -1110,42 +1112,66 @@ async def price_unique_gift(gift, sem):
     name = gift.get("base_name") or ""
     model = (gift.get("model") or {}).get("name")
     async with sem:
-        floor, market, _ = await gift_floor_now(name, model)
-    return {"name": name, "number": gift.get("number"), "model": model or "", "slug": gift.get("name") or "",
-            "price": floor, "market": market}
+        floor, market, _ = await gift_floor_now(name, model, ttl=600)
+    slug = gift.get("name") or ""
+    return {"name": name, "number": gift.get("number"), "model": model or "", "slug": slug,
+            "backdrop": (gift.get("backdrop") or {}).get("name", ""), "price": floor, "market": market,
+            "image": f"https://nft.fragment.com/gift/{slug.lower()}.webp" if slug else ""}
+
+portfolio_cache = {}
+
+async def compute_gift_portfolio(user_id, max_age=600):
+    # قيمة هدايا البروفايل لشخص، مع كاش 10 دقايق (تستخدمه هداياي والاغنى والميني اب)
+    cached = portfolio_cache.get(user_id)
+    if cached and time.time() - cached["ts"] < max_age: return cached
+    data, err = await fetch_profile_gifts(user_id)
+    if data is None:
+        logging.warning(f"getUserGifts failed for {user_id}: {err}")
+        return {"ok": False, "error": err, "ts": time.time()}
+    sem = asyncio.Semaphore(4)
+    priced = await asyncio.gather(*(price_unique_gift(g, sem) for g in data["unique"][:150]), return_exceptions=True)
+    items = sorted((p for p in priced if isinstance(p, dict)), key=lambda p: p["price"], reverse=True)
+    total = sum(p["price"] for p in items)
+    result = {"ok": True, "ts": time.time(), "items": items, "total": total, "count": len(items),
+              "priced": sum(1 for p in items if p["price"]),
+              "regular_count": data["regular_count"], "regular_stars": data["regular_stars"]}
+    portfolio_cache[user_id] = result
+    if len(portfolio_cache) > 3000: portfolio_cache.clear()
+    return result
+
+def gifts_app_button(user_id, chat_type, bot_username):
+    # زر يفتح صفحة الهدايا بالميني اب: web_app بالخاص، ورابط startapp بالكروبات
+    base = get_webapp_base()
+    btn = {"text": "عرض الهدايا بالتطبيق", "style": "success", "icon_custom_emoji_id": "5255980157058975232"}
+    if base and chat_type == "private": btn["web_app"] = {"url": f"{base}/app?gifts={user_id}"}
+    elif MINIAPP_SHORT_NAME and bot_username: btn["url"] = f"https://t.me/{bot_username}/{MINIAPP_SHORT_NAME}?startapp=g_{user_id}"
+    elif base: btn["url"] = f"{base}/app?gifts={user_id}"
+    else: return None
+    return btn
 
 async def show_gifts_value(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user):
     chat_id, msg_id = update.message.chat_id, update.message.message_id
     who = html.escape(target_user.first_name or "")
+    user_names[target_user.id] = target_user.first_name or ""
     wait_id = await send_custom_msg(chat_id, f"جاري حساب قيمة هدايا {who}... {SEARCH_EMOJI}", msg_id)
-    data, err = await fetch_profile_gifts(target_user.id)
-    if data is None:
-        logging.warning(f"getUserGifts failed: {err}")
+    data = await compute_gift_portfolio(target_user.id)
+    if not data["ok"]:
         await edit_custom_msg(chat_id, wait_id, f"ما كدرت أجيب هدايا {who} حالياً {WARN_EMOJI}\n<i>تأكد إن الهدايا ظاهرة بالبروفايل.</i>")
         return
-    if not data["unique"] and not data["regular_count"]:
+    if not data["items"] and not data["regular_count"]:
         await edit_custom_msg(chat_id, wait_id, f"ما لكيت هدايا ظاهرة ببروفايل {who} {WARN_EMOJI}\n<i>لازم تكون الهدايا ظاهرة (مو مخفية) بالبروفايل.</i>")
         return
-    sem = asyncio.Semaphore(4)
-    priced = await asyncio.gather(*(price_unique_gift(g, sem) for g in data["unique"][:150]), return_exceptions=True)
-    priced = [p for p in priced if isinstance(p, dict)]
-    priced.sort(key=lambda p: p["price"], reverse=True)
-    total = sum(p["price"] for p in priced)
-    ton_price = crypto_prices.get('TON', 0)
+    total, ton_price = data["total"], crypto_prices.get('TON', 0)
     lines = [f"{GIFT_FLOOR_EMOJI} <b>هدايا {who} الظاهرة بالبروفايل</b>\n"]
-    shown = 0
-    for p in priced:
-        if shown >= 25: break
+    for i, p in enumerate(data["items"][:25], 1):
         title = f"{html.escape(p['name'])} #{p['number']}" if p["number"] else html.escape(p["name"])
         model = f" · <i>{html.escape(p['model'])}</i>" if p["model"] else ""
         price = f"<b>{format_exact_price(p['price'])}</b> {GRAM_EMOJI}" if p["price"] else "غير معروف"
         link = f"<a href='https://t.me/nft/{html.escape(p['slug'])}'>{title}</a>" if p["slug"] else title
-        lines.append(f"{shown + 1}. {link}{model} — {price}")
-        shown += 1
-    if len(priced) > shown: lines.append(f"<i>... و {len(priced) - shown} هدية ثانية</i>")
+        lines.append(f"{i}. {link}{model} — {price}")
+    if data["count"] > 25: lines.append(f"<i>... و {data['count'] - 25} هدية ثانية</i>")
     lines.append("╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼")
-    priced_count = sum(1 for p in priced if p["price"])
-    lines.append(f"🎁 الهدايا المطورة (NFT): <b>{len(priced)}</b>" + (f" (مسعّرة: {priced_count})" if priced_count != len(priced) else ""))
+    lines.append(f"🎁 الهدايا المطورة (NFT): <b>{data['count']}</b>" + (f" (مسعّرة: {data['priced']})" if data["priced"] != data["count"] else ""))
     lines.append(f"{GRAM_EMOJI} القيمة الكلية: <b>{format_large_amount(round(total, 2))}</b> GRAM")
     if ton_price and total:
         usd = total * ton_price
@@ -1154,7 +1180,160 @@ async def show_gifts_value(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     if data["regular_count"]:
         lines.append(f"⭐ هدايا عادية: <b>{data['regular_count']}</b>" + (f" (تتحول لـ {data['regular_stars']:,} نجمة)" if data["regular_stars"] else ""))
     lines.append("\n<i>السعر = أرخص عرض بمركت لنفس الموديل، واذا ماكو فلور الهدية.</i>")
-    await edit_custom_msg(chat_id, wait_id, "\n".join(lines))
+    app_btn = gifts_app_button(target_user.id, update.message.chat.type, context.bot.username) if data["items"] else None
+    await edit_custom_msg(chat_id, wait_id, "\n".join(lines), extra_buttons=[[app_btn]] if app_btn else None)
+
+
+# ===== سعر الهدية من رابطها (t.me/nft/PlushPepe-123) =====
+GIFT_LINK_RE = re.compile(r'(?:https?://)?t\.me/nft/([A-Za-z0-9]+)-(\d+)', re.IGNORECASE)
+
+def gift_slug_to_name(slug):
+    key = slug.lower()
+    for known in KNOWN_GIFTS:
+        if clean_gift_name(known) == key: return known
+    for d in list(active_listings.values()):
+        if clean_gift_name(d.get('name')) == key: return d['name']
+    return re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', slug)
+
+def _strip_tags(text):
+    return html.unescape(re.sub(r'<[^>]+>', ' ', text or "")).strip()
+
+async def fetch_gift_attributes(slug, number):
+    # نقرا الموديل والخلفية والرمز من صفحة الهدية بتيليجرام
+    attrs = {}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://t.me/nft/{slug}-{number}", headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200: return attrs
+                page = await resp.text()
+    except Exception:
+        return attrs
+    for key in ("Model", "Backdrop", "Symbol"):
+        m = re.search(rf'<th[^>]*>\s*{key}\s*</th>\s*<td[^>]*>(.*?)</td>', page, re.S | re.I)
+        if not m:
+            desc = re.search(r'<meta\s+property="og:description"\s+content="([^"]*)"', page)
+            m = re.search(rf'{key}\s*:\s*([^\n]+)', html.unescape(desc.group(1))) if desc else None
+        if m:
+            value = re.sub(r'\s+', ' ', _strip_tags(m.group(1)))
+            rarity = re.search(r'([\d.]+\s*%)\s*$', value)
+            attrs[key.lower()] = {"name": value[:rarity.start()].strip() if rarity else value, "rarity": rarity.group(1).replace(" ", "") if rarity else ""}
+    return attrs
+
+async def mrkt_find_listing(name, number):
+    gifts = await mrkt_query(gift_name_variants(name), None, count=20)
+    for g in gifts or []:
+        if str(g.get("number")) == str(number) and clean_gift_name(mrkt_gift_name(g)) == clean_gift_name(name):
+            price = extract_ton_price_mrkt(g)
+            if price: return price, g.get("id")
+    return None, None
+
+async def price_gift_link(slug, number):
+    name = gift_slug_to_name(slug)
+    attrs = await fetch_gift_attributes(slug, number)
+    model = (attrs.get("model") or {}).get("name")
+    model_items = await mrkt_cheapest(name, model) if model else None
+    model_floor = model_items[0][0] if model_items else 0
+    floor, market, _ = await gift_floor_now(name)
+    listed_price, listed_id = await mrkt_find_listing(name, number)
+    return {"slug": slug, "number": number, "name": name, "attrs": attrs, "model_floor": model_floor,
+            "floor": floor, "market": market, "listed": listed_price, "listed_id": listed_id,
+            "estimate": model_floor or floor}
+
+async def handle_gift_links(update: Update, context: ContextTypes.DEFAULT_TYPE, links):
+    chat_id, msg_id = update.message.chat_id, update.message.message_id
+    wait_id = await send_custom_msg(chat_id, f"جاري جلب سعر {'الهدايا' if len(links) > 1 else 'الهدية'}... {SEARCH_EMOJI}", msg_id)
+    results = await asyncio.gather(*(price_gift_link(s, n) for s, n in links), return_exceptions=True)
+    ton_price = crypto_prices.get('TON', 0)
+    blocks, buttons, total = [], [], 0
+    for r in results:
+        if not isinstance(r, dict): continue
+        title = f"<a href='https://t.me/nft/{html.escape(r['slug'])}-{r['number']}'>{html.escape(r['name'])} #{r['number']}</a>"
+        lines = [f"{GIFT_FLOOR_EMOJI} <b>{title}</b>"]
+        labels = {"model": "🧬 الموديل", "backdrop": "🎨 الخلفية", "symbol": "🔣 الرمز"}
+        for key, label in labels.items():
+            a = r["attrs"].get(key)
+            if a: lines.append(f"{label}: <b>{html.escape(a['name'])}</b>" + (f" ({html.escape(a['rarity'])})" if a["rarity"] else ""))
+        if r["listed"]:
+            lines.append(f"🛒 معروضة للبيع بمركت: <b>{format_exact_price(r['listed'])}</b> {GRAM_EMOJI}")
+            if r["listed_id"] and len(buttons) < 5:
+                buttons.append([{"text": f"شراء #{r['number']} من MRKT", "url": f"https://t.me/mrkt/app?startapp={r['listed_id']}", "style": "success", "icon_custom_emoji_id": MRKT_ICON_ID}])
+        if r["model_floor"]: lines.append(f"{UP_EMOJI} فلور نفس الموديل: <b>{format_exact_price(r['model_floor'])}</b> {GRAM_EMOJI}")
+        if r["floor"]: lines.append(f"{GRAM_EMOJI} فلور الهدية: <b>{format_exact_price(r['floor'])}</b> ({r['market']})")
+        if r["estimate"]:
+            total += r["estimate"]
+            if ton_price:
+                usd = r["estimate"] * ton_price
+                lines.append(f"💰 القيمة التقريبية: <b>${usd:,.2f}</b> ≈ <b>{usd * last_known_iqd / 100:,.0f}</b> IQD")
+        else:
+            lines.append(f"ما لكيت سعر لهذي الهدية حالياً {WARN_EMOJI}")
+        blocks.append("\n".join(lines))
+    if not blocks:
+        await edit_custom_msg(chat_id, wait_id, f"ما كدرت أجيب سعر الهدية حالياً {WARN_EMOJI}")
+        return
+    text = "\n╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n".join(blocks)
+    if len(blocks) > 1 and total:
+        text += f"\n╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼\n💎 مجموع القيمة: <b>{format_large_amount(round(total, 2))}</b> GRAM" + (f" (≈ ${total * ton_price:,.2f})" if ton_price else "")
+    await edit_custom_msg(chat_id, wait_id, text, extra_buttons=buttons or None)
+
+def find_gift_links(text):
+    seen, links = set(), []
+    for m in GIFT_LINK_RE.finditer(text or ""):
+        key = (m.group(1).lower(), m.group(2))
+        if key in seen: continue
+        seen.add(key)
+        links.append((m.group(1), m.group(2)))
+    return links[:5]
+
+# ===== ترتيب الاغنى بالكروب =====
+# البوت ما يكدر يجيب كل اعضاء الكروب، فيحفظ الاعضاء اللي تكلموا بالكروب ويحسب هداياهم
+MAX_SEEN_PER_CHAT = 500
+RICH_CANDIDATES = 40
+rich_cache = {}
+
+def remember_chat_member(chat, user):
+    if not chat or not user or getattr(user, "is_bot", False) or chat.type not in ("group", "supergroup"): return
+    user_names[user.id] = user.first_name or ""
+    members = chat_seen.setdefault(str(chat.id), {})
+    members[str(user.id)] = {"name": user.first_name or "", "ts": int(time.time())}
+    if len(members) > MAX_SEEN_PER_CHAT:
+        for uid, _ in sorted(members.items(), key=lambda kv: kv[1].get("ts", 0))[:len(members) - MAX_SEEN_PER_CHAT]:
+            members.pop(uid, None)
+
+async def richest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id, msg_id = update.message.chat_id, update.message.message_id
+    if update.message.chat.type not in ("group", "supergroup"):
+        await send_custom_msg(chat_id, f"هذا الأمر يشتغل بالكروبات بس {WARN_EMOJI}", msg_id)
+        return
+    cached = rich_cache.get(chat_id)
+    if cached and time.time() - cached[0] < 600:
+        await send_custom_msg(chat_id, cached[1], msg_id)
+        return
+    members = sorted(chat_seen.get(str(chat_id), {}).items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)[:RICH_CANDIDATES]
+    if not members:
+        await send_custom_msg(chat_id, f"بعدني ما أعرف أعضاء هذا الكروب، خلي الناس تتكلم شوية وارجع جرب {WARN_EMOJI}", msg_id)
+        return
+    wait_id = await send_custom_msg(chat_id, f"جاري حساب هدايا {len(members)} عضو... {WAIT_EMOJI}\n<i>ممكن ياخذ دقيقة</i>", msg_id)
+    sem = asyncio.Semaphore(3)
+    async def one(uid):
+        async with sem:
+            try: return int(uid), await compute_gift_portfolio(int(uid), max_age=3600)
+            except Exception: return int(uid), None
+    results = await asyncio.gather(*(one(uid) for uid, _ in members))
+    ranking = sorted(((uid, d) for uid, d in results if d and d.get("ok") and d.get("total", 0) > 0), key=lambda x: x[1]["total"], reverse=True)[:10]
+    if not ranking:
+        await edit_custom_msg(chat_id, wait_id, f"ما لكيت أحد عنده هدايا ظاهرة بالبروفايل بهذا الكروب {WARN_EMOJI}")
+        return
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    ton_price = crypto_prices.get('TON', 0)
+    lines = [f"{CROWN_EMOJI} <b>أغنى أعضاء الكروب بالهدايا</b>\n"]
+    for i, (uid, d) in enumerate(ranking, 1):
+        name = html.escape(chat_seen.get(str(chat_id), {}).get(str(uid), {}).get("name") or user_names.get(uid) or "عضو")
+        usd = f" (≈ ${d['total'] * ton_price:,.0f})" if ton_price else ""
+        lines.append(f"{medals.get(i, f'{i}.')} <a href='tg://user?id={uid}'>{name}</a> — <b>{format_large_amount(round(d['total'], 2))}</b> {GRAM_EMOJI}{usd} · {d['count']} هدية")
+    lines.append(f"\n<i>يحسب آخر {len(members)} عضو تكلموا بالكروب وهداياهم ظاهرة بالبروفايل. يتحدث كل 10 دقايق.</i>")
+    text = "\n".join(lines)
+    rich_cache[chat_id] = (time.time(), text)
+    await edit_custom_msg(chat_id, wait_id, text)
 
 async def check_ton_wallet(address):
     if not address or not re.fullmatch(r'[A-Za-z0-9_:.\-]{3,100}', address): return False, 0, 0
@@ -2075,6 +2254,8 @@ PERSIST_KEYS = {
     "gift_price_alerts": (lambda: gift_price_alerts, lambda d: _set_global("gift_price_alerts", [a for a in d if isinstance(a, dict)])),
     "master_manual": (lambda: master_manual, lambda d: master_manual.update(d)),
     "price_history": (lambda: price_history, lambda d: merge_price_history(d)),
+    "chat_seen": (lambda: chat_seen, lambda d: chat_seen.update(d)),
+    "user_names": (lambda: {str(k): v for k, v in user_names.items()}, lambda d: user_names.update(_int_keys(d))),
 }
 
 def _state_hash(data):
@@ -2127,8 +2308,11 @@ async def persistence_loop():
         await asyncio.sleep(10)
         await save_persistent_state()
 
+MAIN_LOOP = {"loop": None}
+
 async def post_init(app: Application):
     global mrkt_http
+    MAIN_LOOP["loop"] = asyncio.get_running_loop()
     await load_persistent_state()
     asyncio.create_task(persistence_loop())
     mrkt_http = AsyncSession(impersonate="chrome")
@@ -2338,7 +2522,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
     chat_id, user_id, msg_id = update.message.chat_id, update.message.from_user.id, update.message.message_id
     await track_new_user(update.effective_user, context)
+    remember_chat_member(update.message.chat, update.message.from_user)
     if await is_user_banned(update, context): return
+    gift_links = find_gift_links(update.message.text)
+    if gift_links:
+        await handle_gift_links(update, context, gift_links)
+        return
+    if text.lstrip('/') in ["اغنياء", "الاغنياء", "الأغنياء", "الاغنى", "الأغنى", "اغنى", "أغنى", "اغنى واحد", "ترتيب الاغنى"]:
+        await richest_cmd(update, context)
+        return
     address = find_ton_address(update.message.text)
     if re.match(r'^/?راقب(?:\s|$)', text):
         await watch_wallet_cmd(update, context, address)
@@ -2382,6 +2574,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f'{SEARCH_EMOJI} <b>ارسل اي عنوان محفظة</b>: يطلعلك رصيدها وآخر تحويل وعدد المقتنيات وأنشطتها {END_EMOJIS}\n'
         msg += f'{WHALE_BELL} <b>راقب [العنوان]</b>: يبلغك بكل تحويل يدخل او يطلع من المحفظة (<b>مراقباتي</b> لعرضها) {END_EMOJIS}\n'
         msg += f'{GIFT_FLOOR_EMOJI} <b>هداياي</b>: قيمة هداياك الظاهرة بالبروفايل حسب سعر مركت (او رد على شخص بـ <b>هداياه</b>) {END_EMOJIS}\n'
+        msg += f'{GIFT_FLOOR_EMOJI} <b>ارسل رابط هدية</b> (t.me/nft/...): يطلع موديلها وسعرها، وتكدر ترسل اكثر من رابط {END_EMOJIS}\n'
+        msg += f'{CROWN_EMOJI} <b>الاغنى</b>: ترتيب أغنى أعضاء الكروب بالهدايا {END_EMOJIS}\n'
         msg += f'{CLIPBOARD_EMOJI} <b>@{context.bot.username} 100 دولار</b>: الصرف من اي محادثة {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
@@ -2508,7 +2702,7 @@ WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
 @web_app.route('/')
 def home():
     # اذا تيليجرام فتح الميني اب على الرابط الرئيسي (بدون /app) نعرض صفحة المحفظة
-    if request.args.get("tgWebAppStartParam") or request.args.get("address"):
+    if request.args.get("tgWebAppStartParam") or request.args.get("address") or request.args.get("gifts"):
         return send_from_directory(WEBAPP_DIR, "wallet.html")
     return "البوت شغال بقوة 🔥"
 
@@ -2535,6 +2729,20 @@ def api_wallet_events(address):
     try: data = asyncio.run(fetch_wallet_events(address, int(before_lt) if before_lt.isdigit() else None))
     except Exception: data = None
     return api_response(data) if data is not None else api_response({"error": "unavailable"}, 502)
+
+@web_app.route('/api/gifts/<int:user_id>')
+def api_gifts(user_id):
+    # حساب الهدايا يستخدم اتصال مركت اللي عايش على حلقة البوت، فنشغله هناك
+    loop = MAIN_LOOP["loop"]
+    if loop is None: return api_response({"error": "starting"}, 503)
+    try: data = asyncio.run_coroutine_threadsafe(compute_gift_portfolio(user_id), loop).result(timeout=120)
+    except Exception: data = None
+    if not data or not data.get("ok"): return api_response({"error": "unavailable"}, 502)
+    ton_price = crypto_prices.get('TON', 0)
+    return api_response({"user_id": user_id, "name": user_names.get(user_id, ""), "items": data["items"], "total": data["total"],
+                         "count": data["count"], "priced": data["priced"], "ton_price": ton_price,
+                         "total_usd": data["total"] * ton_price, "total_iqd": data["total"] * ton_price * last_known_iqd / 100,
+                         "regular_count": data["regular_count"], "regular_stars": data["regular_stars"]})
 
 @web_app.route('/api/wallet/<address>/nfts')
 def api_wallet_nfts(address):
