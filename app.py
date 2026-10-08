@@ -1,11 +1,11 @@
 import os, base64
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-import time, aiohttp, logging, threading, asyncio, re, html, json, websockets
+import time, hashlib, aiohttp, logging, threading, asyncio, re, html, json, websockets
 from datetime import datetime, timezone, timedelta
 from flask import Flask, jsonify, request, send_from_directory
 from urllib.parse import unquote
 from telegram import Update
-from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes, ChatMemberHandler
+from telegram.ext import Application, MessageHandler, ConversationHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes, ChatMemberHandler, InlineQueryHandler
 from telegram.request import HTTPXRequest
 from pyrogram import Client as PyroClient
 from pyrogram.raw.functions.messages import RequestAppWebView
@@ -56,6 +56,8 @@ bot_users = set()
 whale_alert_users = {} 
 banned_users = set() 
 user_mapping = {} 
+wallet_watches = []
+gift_price_alerts = []
 
 mrkt_http = None
 
@@ -66,6 +68,7 @@ ASK_GIFT_SEARCH_MRKT = 6
 ASK_BAN = 7
 ASK_UNBAN = 8
 ASK_ALERT_TYPE, ASK_CURRENCY_NAME, ASK_CURRENCY_PRICE = 20, 21, 22
+ASK_GIFT_ALERT_NAME, ASK_GIFT_ALERT_PRICE = 23, 24
 ASK_CALC_CURRENCY, ASK_CALC_PRICE, ASK_CALC_AMOUNT = 30, 31, 32
 
 WS_URL = 'wss://gifts.coffin.meme/api/marketplace/ws'
@@ -196,61 +199,143 @@ async def get_mrkt_auth_token():
             peer = await pyro_client.resolve_peer('mrkt')
             bot = InputUser(user_id=peer.user_id, access_hash=peer.access_hash)
             bot_app = InputBotAppShortName(bot_id=bot, short_name="app")
-        except Exception: return None
+        except Exception as e:
+            logging.warning(f"MRKT auth: resolve @mrkt failed: {e}")
+            return None
         web_view = await pyro_client.invoke(RequestAppWebView(peer=peer, app=bot_app, platform="android", write_allowed=True))
         init_data = unquote(web_view.url.split('tgWebAppData=', 1)[1].split('&tgWebAppVersion', 1)[0])
         r = await mrkt_http.post("https://api.tgmrkt.io/api/v1/auth", json={"data": init_data}, headers={"Referer": "https://cdn.tgmrkt.io/"})
         if r.status_code == 200:
             token = r.json().get('token')
             if token: return token
-    except Exception: pass
+        logging.warning(f"MRKT auth: api returned HTTP {r.status_code}")
+    except Exception as e:
+        logging.warning(f"MRKT auth failed (check PYRO_API_ID / PYRO_API_HASH / SESSION_NAME): {e}")
     return None
 
+MRKT_SALING_URL = 'https://api.tgmrkt.io/api/v1/gifts/saling'
+mrkt_floor_cache = {}
+mrkt_status = {"auth_ok": False, "last_ok": 0, "last_error": ""}
+
+def clean_gift_name(name):
+    return (name or "").lower().replace(' ', '').replace('’', '').replace("'", "").replace('-', '')
+
+def gift_name_variants(name):
+    return list({name, name.replace("’", "'"), name.replace("'", "’")}) if name else []
+
+def mrkt_gift_name(g):
+    return g.get("collectionName") or g.get("title") or "Unknown"
+
+def tonnel_floor_for(name):
+    target = clean_gift_name(name)
+    prices = [d['price'] for d in active_listings.values() if d.get('price', 0) > 0 and clean_gift_name(d.get('name')) == target]
+    return min(prices) if prices else 0
+
+async def mrkt_query(collections=None, models=None, count=20, ordering="Price", cursor=""):
+    # طلب واحد لمركت. يرجع قائمة الهدايا المعروضة او None اذا فشل
+    global mrkt_token
+    if not mrkt_http: return None
+    if not mrkt_token:
+        # ما نعيد تسجيل الدخول اكثر من مرة بالدقيقة حتى ما ينحظر الحساب
+        if time.time() - mrkt_status.get("last_auth", 0) < 60: return None
+        mrkt_status["last_auth"] = time.time()
+        mrkt_token = await get_mrkt_auth_token()
+        mrkt_status["auth_ok"] = bool(mrkt_token)
+        if not mrkt_token:
+            mrkt_status["last_error"] = "auth failed (check PYRO_API_ID / PYRO_API_HASH / SESSION_NAME)"
+            return None
+    payload = get_mrkt_payload(collections or [], cursor, ordering)
+    payload["modelNames"] = models or []
+    payload["count"] = count
+    try:
+        r = await mrkt_http.post(MRKT_SALING_URL, headers=make_mrkt_headers(mrkt_token), json=payload, timeout=15)
+    except Exception as e:
+        mrkt_status["last_error"] = f"request error: {e}"[:200]
+        return None
+    if r.status_code in (401, 403):
+        mrkt_token = None
+        mrkt_status.update(auth_ok=False, last_error=f"HTTP {r.status_code}, token reset")
+        return None
+    if r.status_code != 200:
+        mrkt_status["last_error"] = f"HTTP {r.status_code}"
+        return None
+    mrkt_status.update(auth_ok=True, last_ok=time.time())
+    try: data = r.json()
+    except Exception: return None
+    return [g for g in data.get("gifts", []) if isinstance(g, dict) and g.get("isOnSale") is not False]
+
+async def mrkt_cheapest(name, model=None, ttl=120):
+    # ارخص عروض مركت لهدية (ولموديل معين اذا انطيناه). يرجع [(سعر, id, هدية)] مرتبة
+    key = (clean_gift_name(name), (model or "").lower())
+    cached = mrkt_floor_cache.get(key)
+    if cached and time.time() - cached[0] < ttl: return cached[1]
+    gifts = await mrkt_query(gift_name_variants(name), [model] if model else None, count=5)
+    if gifts is None: return None
+    target = clean_gift_name(name)
+    items = []
+    for g in gifts:
+        price = extract_ton_price_mrkt(g)
+        if price and clean_gift_name(mrkt_gift_name(g)) == target: items.append((price, g.get("id"), g))
+    items.sort(key=lambda x: x[0])
+    mrkt_floor_cache[key] = (time.time(), items)
+    if len(mrkt_floor_cache) > 2000: mrkt_floor_cache.clear()
+    return items
+
+async def gift_floor_now(name, model=None):
+    # افضل سعر فلور نعرفه: مركت (للموديل اذا موجود) او تونيل
+    items = await mrkt_cheapest(name, model) if model else None
+    if items: return items[0][0], "MRKT", items[0][1]
+    items = await mrkt_cheapest(name)
+    tonnel = tonnel_floor_for(name)
+    mrkt_price = items[0][0] if items else 0
+    if mrkt_price and (not tonnel or mrkt_price <= tonnel): return mrkt_price, "MRKT", items[0][1]
+    if tonnel: return tonnel, "Tonnel", None
+    return 0, "", None
+
+sniper_state = {"seeded": False}
+
+async def run_gift_sniper():
+    # يشوف آخر الهدايا المعروضة بمركت، واذا وحدة ارخص من باقي الفلور بـ 6% او اكثر يبلغ المشتركين
+    recent = await mrkt_query([], None, count=20, ordering=None)
+    if not recent: return
+    fresh = [g for g in recent if g.get("id") and g.get("id") not in notified_mrkt_gifts]
+    for g in fresh: notified_mrkt_gifts.add(g.get("id"))
+    if len(notified_mrkt_gifts) > 5000:
+        notified_mrkt_gifts.clear()
+        for g in recent: notified_mrkt_gifts.add(g.get("id"))
+    if not sniper_state["seeded"]:
+        # اول دورة بعد التشغيل: نسجل الموجود بدون تنبيه حتى ما نبلغ عن عروض قديمة
+        sniper_state["seeded"] = True
+        return
+    for g in fresh[:10]:
+        price = extract_ton_price_mrkt(g)
+        if not price: continue
+        name = mrkt_gift_name(g)
+        items = await mrkt_cheapest(name, ttl=30) or []
+        others = [p for p, gid, _ in items if gid != g.get("id")]
+        refs = [p for p in [others[0] if others else 0, tonnel_floor_for(name)] if p > 0]
+        if not refs: continue
+        floor = min(refs)
+        if price <= floor * 0.94:
+            asyncio.create_task(trigger_gift_alert(name, floor, price, g.get("id"), "MRKT", g.get("number")))
+
 async def mrkt_updater_loop():
-    global mrkt_token, mrkt_floor, mrkt_http, active_listings, notified_mrkt_gifts
     while True:
         try:
-            if not mrkt_token: mrkt_token = await get_mrkt_auth_token()
-            if mrkt_token and mrkt_http:
-                headers = make_mrkt_headers(mrkt_token)
-                r = await mrkt_http.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=get_mrkt_payload([], cursor="", ordering="Price"))
-                if r.status_code in [401, 403]:
-                    mrkt_token = None 
-                    await asyncio.sleep(10)
-                    continue
-                if r.status_code == 200:
-                    gifts = r.json().get('gifts', [])
-                    if gifts:
-                        cheapest = gifts[0]
-                        ton_price = extract_ton_price_mrkt(cheapest)
-                        if ton_price:
-                            mrkt_floor['price'] = format_exact_price(ton_price)
-                            mrkt_floor['name'] = cheapest.get("title") or cheapest.get("collectionName") or "Unknown"
-                            gift_id = cheapest.get("id")
-                            mrkt_floor['url_mrkt'] = f"https://t.me/mrkt/app?startapp={gift_id}"
-                            gift_num = cheapest.get("number")
-                            clean_url_name = mrkt_floor['name'].lower().replace(' ', '').replace('’', '').replace("'", "")
-                            mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}" if gift_num else f"https://t.me/nft/{clean_url_name}"
-
-                if gift_alert_users:
-                    json_recent = get_mrkt_payload([], cursor="", ordering=None)
-                    r_rec = await mrkt_http.post('https://api.tgmrkt.io/api/v1/gifts/saling', headers=headers, json=json_recent)
-                    if r_rec.status_code == 200:
-                        recent_gifts = r_rec.json().get('gifts', [])
-                        for g in recent_gifts:
-                            g_id = g.get("id")
-                            if not g_id or g_id in notified_mrkt_gifts: continue
-                            ton_price = extract_ton_price_mrkt(g)
-                            if ton_price:
-                                gift_name = g.get("title") or g.get("collectionName") or "Unknown"
-                                clean_target_name = gift_name.lower().replace(' ', '').replace('’', '').replace("'", "")
-                                known_prices = [d['price'] for d in active_listings.values() if d['name'].lower().replace(' ', '').replace('’', '').replace("'", "") == clean_target_name and d['price'] > 0]
-                                current_floor = min(known_prices) if known_prices else 0
-                                if current_floor > 0 and ton_price <= (current_floor * 0.94):
-                                    notified_mrkt_gifts.add(g_id)
-                                    if len(notified_mrkt_gifts) > 5000: notified_mrkt_gifts.clear()
-                                    asyncio.create_task(trigger_gift_alert(gift_name, current_floor, ton_price, g_id, "MRKT", g.get("number")))
-        except Exception: pass
+            gifts = await mrkt_query([], None, count=20, ordering="Price")
+            if gifts:
+                cheapest = gifts[0]
+                ton_price = extract_ton_price_mrkt(cheapest)
+                if ton_price:
+                    mrkt_floor['price'] = format_exact_price(ton_price)
+                    mrkt_floor['name'] = mrkt_gift_name(cheapest)
+                    mrkt_floor['url_mrkt'] = f"https://t.me/mrkt/app?startapp={cheapest.get('id')}"
+                    gift_num = cheapest.get("number")
+                    clean_url_name = mrkt_floor['name'].lower().replace(' ', '').replace('’', '').replace("'", "")
+                    mrkt_floor['url_telegram'] = f"https://t.me/nft/{clean_url_name}-{gift_num}" if gift_num else f"https://t.me/nft/{clean_url_name}"
+            if gift_alert_users: await run_gift_sniper()
+        except Exception as e:
+            logging.warning(f"mrkt loop error: {e}")
         await asyncio.sleep(15)
 
 def build_keyboard(extra_buttons=None):
@@ -479,6 +564,24 @@ async def set_master_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_fetch_time = 0
     record_price_history('IQD', value, min_gap=0)
     await send_custom_msg(chat_id, f"{SUCCESS_EMOJI} تم تثبيت سعر الماستر: <b>{value:,}</b> IQD لكل 100$", msg_id)
+
+async def bot_status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id not in ADMIN_IDS: return
+    ok, bad = "✅", "❌"
+    mongo = f"{ok} متصل" if mongo_state["ok"] else (f"{bad} {html.escape(mongo_state['error'] or 'غير مضبوط (MONGO_URI)')}" if MONGO_URI or mongo_state["error"] else f"{bad} غير مضبوط (MONGO_URI)")
+    mrkt_ago = f"آخر رد قبل {int(time.time() - mrkt_status['last_ok'])} ثانية" if mrkt_status["last_ok"] else "ولا رد لحد الآن"
+    mrkt = (f"{ok} شغال ({mrkt_ago})" if mrkt_status["auth_ok"] and mrkt_token else f"{bad} {html.escape(mrkt_status['last_error'] or 'ما مسجل دخول')}")
+    lines = [f"{CLIPBOARD_EMOJI} <b>حالة البوت</b>\n",
+             f"🗄 MongoDB: {mongo}",
+             f"🛒 MRKT: {mrkt}",
+             f"💎 Tonnel: {ok if active_listings else bad} {len(active_listings):,} عرض",
+             f"💳 الماستر: <b>{last_known_iqd:,}</b> ({'يدوي' if master_manual.get('price') else 'تلقائي'}) — نقاط المؤشر: {len(price_history.get('IQD', []))}",
+             f"{GRAM_EMOJI} الجرام: ${crypto_prices.get('TON', 0):,.3f}",
+             "",
+             f"👥 المستخدمين: {len(bot_users):,} | المحافظ المربوطة: {len(user_wallets):,}",
+             f"🔔 تنبيهات عملات: {len(alerts_db)} | هدايا معينة: {len(gift_price_alerts)} | صيد: {len(gift_alert_users)}",
+             f"👁 محافظ تحت المراقبة: {len(wallet_watches)} | مؤشرات حية: {len(live_charts)}"]
+    await send_custom_msg(update.message.chat_id, "\n".join(lines), update.message.message_id)
 
 async def reset_market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ADMIN_IDS: return
@@ -873,6 +976,186 @@ async def fetch_wallet_nfts(address, offset=0):
                       "verified": it.get("trust") == "whitelist" or bool(it.get("approved_by"))})
     return {"items": items, "has_more": len(items) >= 48}
 
+# ===== مراقبة المحافظ =====
+MAX_WATCHES_PER_USER = 5
+
+def describe_watch_action(action, account_raw):
+    # يرجع نص يوصف العملية، او None اذا ما تهم (سبام صغير او عملية فاشلة)
+    if action.get("status") == "failed": return None
+    t = parse_transfer_action(action, account_raw, {})
+    if t:
+        if t["type"] == "TonTransfer" and t["direction"] == "in" and t["amount"] < 0.01: return None
+        is_out = t["direction"] == "out"
+        amount_txt = f"{t['amount']:,.4f}".rstrip('0').rstrip('.') if t['amount'] < 1 else f"{t['amount']:,.2f}"
+        line = (f"{'📤 إرسال' if is_out else '📥 استلام'}: <b>{amount_txt} {html.escape(t['symbol'])}</b>"
+                + (f" (≈ ${t['usd']:,.2f})" if t['usd'] >= 0.01 else ""))
+        other = account_label(t["counterparty"])
+        if other: line += f"\n👤 {'إلى' if is_out else 'من'}: <code>{html.escape(other)}</code>"
+        if t["comment"]: line += f"\n💬 {html.escape(t['comment'][:100])}"
+        return line
+    if action.get("type") == "NftItemTransfer":
+        d = action.get("NftItemTransfer", {})
+        is_out = (d.get("sender") or {}).get("address") == account_raw
+        return f"{GIFT_FLOOR_EMOJI} {'إرسال' if is_out else 'استلام'} NFT"
+    preview = action.get("simple_preview") or {}
+    if preview.get("description"): return f"🔁 {html.escape(preview.get('name') or '')}: {html.escape(preview['description'][:150])}"
+    return None
+
+async def fetch_latest_events(address, limit=10):
+    async with aiohttp.ClientSession() as session:
+        account = await tonapi_get(session, f"/v2/accounts/{address}")
+        events = await tonapi_get(session, f"/v2/accounts/{address}/events", {"limit": limit})
+    if not account or events is None: return None, None
+    return account.get("address", ""), events.get("events", [])
+
+async def watch_wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, address):
+    user, chat_id, msg_id = update.message.from_user, update.message.chat_id, update.message.message_id
+    if not address:
+        address = user_wallets.get(user.id)
+        if not address or not is_valid_ton_address(address):
+            await send_custom_msg(chat_id, f"اكتب <code>راقب</code> وبعدها عنوان المحفظة.\nمثال: <code>راقب UQB1j9...cclNK</code> {WARN_EMOJI}", msg_id)
+            return
+    mine = [w for w in wallet_watches if w["user_id"] == user.id]
+    if any(w["address"] == address for w in mine):
+        await send_custom_msg(chat_id, f"هذي المحفظة تحت المراقبة من قبل {WARN_EMOJI}", msg_id)
+        return
+    if len(mine) >= MAX_WATCHES_PER_USER:
+        await send_custom_msg(chat_id, f"الحد الأقصى {MAX_WATCHES_PER_USER} محافظ. الغي وحدة بـ <code>الغاء مراقبة</code> {WARN_EMOJI}", msg_id)
+        return
+    wait_id = await send_custom_msg(chat_id, f"جاري تفعيل المراقبة... {SEARCH_EMOJI}", msg_id)
+    raw, events = await fetch_latest_events(address, limit=1)
+    if raw is None:
+        await edit_custom_msg(chat_id, wait_id, f"ما كدرت أوصل لهذي المحفظة حالياً، حاول بعد شوية {WARN_EMOJI}")
+        return
+    wallet_watches.append({"user_id": user.id, "name": html.escape(user.first_name), "chat_id": chat_id, "address": address,
+                           "raw": raw, "last_event": events[0].get("event_id") if events else "", "last_ts": events[0].get("timestamp", 0) if events else 0})
+    await edit_custom_msg(chat_id, wait_id, f"{SUCCESS_EMOJI} <b>تم تفعيل المراقبة!</b>\n<code>{address}</code>\n\n"
+                                            f"راح أبلغك هنا بكل تحويل يدخل أو يطلع من هذي المحفظة.\n"
+                                            f"لعرض مراقباتك: <code>مراقباتي</code>\nللإلغاء: <code>الغاء مراقبة</code>")
+
+async def unwatch_wallet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE, address):
+    user_id = update.message.from_user.id
+    before = len(wallet_watches)
+    wallet_watches[:] = [w for w in wallet_watches if not (w["user_id"] == user_id and (not address or w["address"] == address))]
+    removed = before - len(wallet_watches)
+    msg = f"تم إلغاء مراقبة {removed} محفظة {SUCCESS_EMOJI}" if removed else f"ما عندك مراقبة على هذي المحفظة {WARN_EMOJI}"
+    await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
+
+async def list_watches_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mine = [w for w in wallet_watches if w["user_id"] == update.message.from_user.id]
+    if not mine:
+        await send_custom_msg(update.message.chat_id, f"ما عندك محافظ تحت المراقبة.\nللإضافة: <code>راقب العنوان</code> {WARN_EMOJI}", update.message.message_id)
+        return
+    lines = [f"{SEARCH_EMOJI} <b>المحافظ تحت المراقبة:</b>\n"] + [f"{i}. <code>{w['address']}</code>" for i, w in enumerate(mine, 1)]
+    lines.append("\nللإلغاء: <code>الغاء مراقبة العنوان</code> او <code>الغاء مراقبة</code> للكل")
+    await send_custom_msg(update.message.chat_id, "\n".join(lines), update.message.message_id)
+
+async def wallet_watch_loop():
+    # كل دقيقة نفحص كل محفظة مرة وحدة (حتى لو اكثر من شخص يراقبها) ونبلغ بالعمليات الجديدة
+    while True:
+        await asyncio.sleep(60)
+        if not wallet_watches: continue
+        for address in list({w["address"] for w in wallet_watches}):
+            try:
+                watchers = [w for w in wallet_watches if w["address"] == address]
+                if not watchers: continue
+                raw, events = await fetch_latest_events(address, limit=10)
+                if raw is None or not events: continue
+                last_ts = max(w.get("last_ts", 0) for w in watchers)
+                seen = {w.get("last_event") for w in watchers}
+                new_events = []
+                for ev in events:
+                    if ev.get("event_id") in seen or ev.get("timestamp", 0) < last_ts: break
+                    if not ev.get("in_progress"): new_events.append(ev)
+                if events[0].get("in_progress") and not new_events: continue
+                newest = next((ev for ev in events if not ev.get("in_progress")), events[0])
+                for w in watchers: w.update(last_event=newest.get("event_id"), last_ts=newest.get("timestamp", 0), raw=raw)
+                for ev in reversed(new_events):
+                    if ev.get("is_scam"): continue
+                    lines = [d for d in (describe_watch_action(a, raw) for a in ev.get("actions", [])) if d]
+                    if not lines: continue
+                    body = "\n".join(lines[:5])
+                    btn = [[{"text": "عرض العملية", "url": f"https://tonviewer.com/transaction/{ev.get('event_id')}", "style": "primary", "icon_custom_emoji_id": "5411597774359653692"}]]
+                    by_chat = {}
+                    for w in watchers: by_chat.setdefault(w["chat_id"], []).append(w)
+                    for chat_id, ws in by_chat.items():
+                        mentions = " ".join(f"<a href='tg://user?id={w['user_id']}'>{w['name']}</a>" for w in ws)
+                        await send_custom_msg(chat_id, f"{WHALE_BELL} {mentions}\n\n<b>حركة جديدة بالمحفظة</b> <code>{short_addr(address)}</code>\n\n{body}\n\n🕒 {format_time_ago(ev.get('timestamp', 0))}", extra_buttons=btn)
+            except Exception as e:
+                logging.warning(f"wallet watch error {address}: {e}")
+            await asyncio.sleep(1.2 if not TONAPI_KEY else 0.2)
+
+# ===== قيمة هدايا حساب التلي =====
+async def fetch_profile_gifts(user_id, max_pages=5):
+    # يجيب الهدايا الظاهرة ببروفايل الشخص من Bot API (getUserGifts)
+    unique, regular_count, regular_stars, offset = [], 0, 0, ""
+    for _ in range(max_pages):
+        payload = {"user_id": user_id, "limit": 100}
+        if offset: payload["offset"] = offset
+        data = await tg_api("getUserGifts", payload)
+        if not data.get("ok"):
+            return None, data.get("description", "")
+        res = data.get("result") or {}
+        for item in res.get("gifts", []):
+            if item.get("type") == "unique" and item.get("gift"):
+                unique.append(item["gift"])
+            elif item.get("type") == "regular":
+                regular_count += 1
+                regular_stars += int(item.get("convert_star_count") or 0)
+        offset = res.get("next_offset") or ""
+        if not offset: break
+    return {"unique": unique, "regular_count": regular_count, "regular_stars": regular_stars}, ""
+
+async def price_unique_gift(gift, sem):
+    name = gift.get("base_name") or ""
+    model = (gift.get("model") or {}).get("name")
+    async with sem:
+        floor, market, _ = await gift_floor_now(name, model)
+    return {"name": name, "number": gift.get("number"), "model": model or "", "slug": gift.get("name") or "",
+            "price": floor, "market": market}
+
+async def show_gifts_value(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user):
+    chat_id, msg_id = update.message.chat_id, update.message.message_id
+    who = html.escape(target_user.first_name or "")
+    wait_id = await send_custom_msg(chat_id, f"جاري حساب قيمة هدايا {who}... {SEARCH_EMOJI}", msg_id)
+    data, err = await fetch_profile_gifts(target_user.id)
+    if data is None:
+        logging.warning(f"getUserGifts failed: {err}")
+        await edit_custom_msg(chat_id, wait_id, f"ما كدرت أجيب هدايا {who} حالياً {WARN_EMOJI}\n<i>تأكد إن الهدايا ظاهرة بالبروفايل.</i>")
+        return
+    if not data["unique"] and not data["regular_count"]:
+        await edit_custom_msg(chat_id, wait_id, f"ما لكيت هدايا ظاهرة ببروفايل {who} {WARN_EMOJI}\n<i>لازم تكون الهدايا ظاهرة (مو مخفية) بالبروفايل.</i>")
+        return
+    sem = asyncio.Semaphore(4)
+    priced = await asyncio.gather(*(price_unique_gift(g, sem) for g in data["unique"][:150]), return_exceptions=True)
+    priced = [p for p in priced if isinstance(p, dict)]
+    priced.sort(key=lambda p: p["price"], reverse=True)
+    total = sum(p["price"] for p in priced)
+    ton_price = crypto_prices.get('TON', 0)
+    lines = [f"{GIFT_FLOOR_EMOJI} <b>هدايا {who} الظاهرة بالبروفايل</b>\n"]
+    shown = 0
+    for p in priced:
+        if shown >= 25: break
+        title = f"{html.escape(p['name'])} #{p['number']}" if p["number"] else html.escape(p["name"])
+        model = f" · <i>{html.escape(p['model'])}</i>" if p["model"] else ""
+        price = f"<b>{format_exact_price(p['price'])}</b> {GRAM_EMOJI}" if p["price"] else "غير معروف"
+        link = f"<a href='https://t.me/nft/{html.escape(p['slug'])}'>{title}</a>" if p["slug"] else title
+        lines.append(f"{shown + 1}. {link}{model} — {price}")
+        shown += 1
+    if len(priced) > shown: lines.append(f"<i>... و {len(priced) - shown} هدية ثانية</i>")
+    lines.append("╼╼╼╼╼╼╼╼╼╼╼╼╼╼╼")
+    priced_count = sum(1 for p in priced if p["price"])
+    lines.append(f"🎁 الهدايا المطورة (NFT): <b>{len(priced)}</b>" + (f" (مسعّرة: {priced_count})" if priced_count != len(priced) else ""))
+    lines.append(f"{GRAM_EMOJI} القيمة الكلية: <b>{format_large_amount(round(total, 2))}</b> GRAM")
+    if ton_price and total:
+        usd = total * ton_price
+        lines.append(f"{USDT_CASH} بالدولار: <b>${usd:,.2f}</b>")
+        lines.append(f"{MASTER_EMOJI} بالماستر: <b>{usd * last_known_iqd / 100:,.0f}</b> IQD")
+    if data["regular_count"]:
+        lines.append(f"⭐ هدايا عادية: <b>{data['regular_count']}</b>" + (f" (تتحول لـ {data['regular_stars']:,} نجمة)" if data["regular_stars"] else ""))
+    lines.append("\n<i>السعر = أرخص عرض بمركت لنفس الموديل، واذا ماكو فلور الهدية.</i>")
+    await edit_custom_msg(chat_id, wait_id, "\n".join(lines))
+
 async def check_ton_wallet(address):
     if not address or not re.fullmatch(r'[A-Za-z0-9_:.\-]{3,100}', address): return False, 0, 0
     try:
@@ -1105,6 +1388,17 @@ async def update_prices_if_needed():
             last_fetch_time = current_time
             return True
     except Exception: return False
+
+CONVERSION_RE = re.compile(r'^(?:صرف|سعر|حساب)?\s*(?:(\d+(?:\.\d+)?)\s*)?(الف|مليون|بليون|مليار|ترليون|كوادرليون)?\s*(جرام|غرام|كرام|قرام|gram|تون|ton|دولار|usdt|usd|\$|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)(?:\s|$)')
+AMOUNT_MULTIPLIERS = {'الف': 1e3, 'مليون': 1e6, 'بليون': 1e9, 'مليار': 1e9, 'ترليون': 1e12, 'كوادرليون': 1e15}
+
+def parse_conversion(text):
+    # "صرف 100 دولار" او "5 الف ماستر" -> (المبلغ, العملة)
+    m = CONVERSION_RE.match(text.strip().lower())
+    if not m or not (m.group(1) or m.group(2)): return None
+    amount = float(m.group(1)) if m.group(1) else 1.0
+    if m.group(2): amount *= AMOUNT_MULTIPLIERS[m.group(2)]
+    return amount, m.group(3)
 
 def generate_conversion_msg(amount, currency_str):
     curr = currency_str.lower()
@@ -1402,6 +1696,7 @@ async def alert_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     btn = [
         [{"text": "نبهني عملات (الأسعار)", "callback_data": "alert_currency_start", "style": "primary", "icon_custom_emoji_id": "5292058354791756351"}],
         [{"text": "نبهني هدايا (صيد الرخيص)", "callback_data": "alert_gifts_toggle", "style": "success", "icon_custom_emoji_id": "5255980157058975232"}],
+        [{"text": "نبهني هدية معينة (سعر الفلور)", "callback_data": "alert_gift_named", "style": "danger", "icon_custom_emoji_id": "5255980157058975232"}],
         CANCEL_BTN
     ]
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id, extra_buttons=btn)
@@ -1425,6 +1720,9 @@ async def alert_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             gift_alert_users[user_id] = {"name": html.escape(query.from_user.first_name), "chat_id": query.message.chat.id}
             await edit_custom_msg(query.message.chat.id, query.message.message_id, f"✅ <b>تم تسجيلك في صيد الهدايا!</b>\n\nسيقوم البوت بمراقبة سوق (مركت) وإشعارك فور نزول هدية أرخص من الفلور بنسبة 6% أو أكثر.")
         return ConversationHandler.END
+    elif data == "alert_gift_named":
+        await edit_custom_msg(query.message.chat.id, query.message.message_id, f"{GIFT_FLOOR_EMOJI} اكتب اسم الهدية اللي تريد أراقب فلورها (مثال: Plush Pepe او pepe):", extra_buttons=[CANCEL_BTN])
+        return ASK_GIFT_ALERT_NAME
     elif data == "stop_gift_alerts":
         user_id = query.from_user.id
         if user_id in gift_alert_users: del gift_alert_users[user_id]
@@ -1469,6 +1767,77 @@ async def alert_currency_price(update: Update, context: ContextTypes.DEFAULT_TYP
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
     return ConversationHandler.END
 
+async def alert_gift_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await is_user_banned(update, context): return ConversationHandler.END
+    raw = update.message.text.strip()
+    gift = resolve_gift_name_mrkt(raw)
+    if not gift:
+        await send_custom_msg(update.message.chat_id, f"اكتب اسم هدية صحيح: {WARN_EMOJI}", update.message.message_id, extra_buttons=[CANCEL_BTN])
+        return ASK_GIFT_ALERT_NAME
+    wait_id = await send_custom_msg(update.message.chat_id, f"جاري جلب فلور <b>{html.escape(gift)}</b>... {SEARCH_EMOJI}", update.message.message_id)
+    floor, market, _ = await gift_floor_now(gift)
+    context.user_data['gift_alert'] = {"gift": gift, "floor": floor}
+    floor_txt = f"الفلور الحالي: <b>{format_exact_price(floor)}</b> {GRAM_EMOJI} ({market})" if floor else f"ما كدرت أجيب الفلور الحالي هسه {WARN_EMOJI}"
+    await edit_custom_msg(update.message.chat_id, wait_id,
+                          f"{GIFT_FLOOR_EMOJI} الهدية: <b>{html.escape(gift)}</b>\n{floor_txt}\n\nاكتب السعر بالجرام اللي تريد أنبهك عنده (أرقام فقط):",
+                          extra_buttons=[CANCEL_BTN])
+    return ASK_GIFT_ALERT_PRICE
+
+async def alert_gift_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await is_user_banned(update, context): return ConversationHandler.END
+    match = re.search(r'(\d+(?:\.\d+)?)', update.message.text.replace(",", ""))
+    info = context.user_data.get('gift_alert')
+    if not info:
+        await send_custom_msg(update.message.chat_id, f"انتهت الجلسة، اكتب نبهني من جديد {WARN_EMOJI}", update.message.message_id)
+        return ConversationHandler.END
+    if not match or float(match.group(1)) <= 0:
+        await send_custom_msg(update.message.chat_id, f"يرجى إدخال رقم صحيح: {WARN_EMOJI}", update.message.message_id, extra_buttons=[CANCEL_BTN])
+        return ASK_GIFT_ALERT_PRICE
+    target = float(match.group(1))
+    floor = info.get("floor") or 0
+    direction = 'up' if floor and target > floor else 'down'
+    user = update.message.from_user
+    user_gift_alerts = [a for a in gift_price_alerts if a['user_id'] == user.id]
+    if len(user_gift_alerts) >= 10:
+        await send_custom_msg(update.message.chat_id, f"عندك 10 تنبيهات هدايا، هذا الحد الأقصى. احذف وحدة بـ /ايقاف {WARN_EMOJI}", update.message.message_id)
+        return ConversationHandler.END
+    gift_price_alerts.append({"user_id": user.id, "name": html.escape(user.first_name), "chat_id": update.message.chat_id,
+                              "gift": info["gift"], "target": target, "direction": direction, "created": int(time.time())})
+    dir_txt = f"يصعد الفلور إلى {UP_EMOJI}" if direction == 'up' else f"ينزل الفلور إلى {DOWN_EMOJI}"
+    await send_custom_msg(update.message.chat_id,
+                          f"{SUCCESS_EMOJI} <b>تم التفعيل!</b>\nراح أنبهك لما {dir_txt} <b>{format_exact_price(target)}</b> {GRAM_EMOJI} لهدية <b>{html.escape(info['gift'])}</b>"
+                          + (f"\n(الفلور الحالي: <b>{format_exact_price(floor)}</b>)" if floor else "") + "\n\nلإيقاف التنبيهات ارسل /ايقاف",
+                          update.message.message_id)
+    return ConversationHandler.END
+
+async def gift_price_alerts_loop():
+    # كل دقيقة نشوف فلور كل هدية عليها تنبيه
+    while True:
+        await asyncio.sleep(60)
+        if not gift_price_alerts: continue
+        try:
+            for gift in {a['gift'] for a in gift_price_alerts}:
+                floor, market, gift_id = await gift_floor_now(gift)
+                if not floor: continue
+                hits = [a for a in gift_price_alerts if a['gift'] == gift and
+                        ((a['direction'] == 'down' and floor <= a['target']) or (a['direction'] == 'up' and floor >= a['target']))]
+                if not hits: continue
+                for a in hits:
+                    if a in gift_price_alerts: gift_price_alerts.remove(a)
+                btn = []
+                if market == "MRKT" and gift_id:
+                    btn.append([{"text": "شراء من MRKT", "url": f"https://t.me/mrkt/app?startapp={gift_id}", "style": "success", "icon_custom_emoji_id": MRKT_ICON_ID}])
+                by_chat = {}
+                for a in hits: by_chat.setdefault(a['chat_id'], []).append(a)
+                for chat_id, items in by_chat.items():
+                    mentions = " ".join(f"<a href='tg://user?id={a['user_id']}'>{a['name']}</a>" for a in items)
+                    await send_custom_msg(chat_id, f"{WHALE_BELL} {mentions}\n\n🔥 <b>فلور {html.escape(gift)} وصل للسعر المطلوب!</b>\n"
+                                                   f"الفلور الحالي: <b>{format_exact_price(floor)}</b> {GRAM_EMOJI} ({market})\n\nلإيقاف التنبيهات ارسل /ايقاف",
+                                          extra_buttons=btn)
+                await asyncio.sleep(1)
+        except Exception as e:
+            logging.warning(f"gift alerts loop error: {e}")
+
 async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_banned(update, context): return ConversationHandler.END
     global alerts_db, gift_alert_users
@@ -1479,7 +1848,9 @@ async def stop_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in gift_alert_users:
         del gift_alert_users[user_id]
         removed_sniper = True
-    if len(alerts_db) < initial_len or removed_sniper:
+    gift_before = len(gift_price_alerts)
+    gift_price_alerts[:] = [a for a in gift_price_alerts if a['user_id'] != user_id]
+    if len(alerts_db) < initial_len or removed_sniper or len(gift_price_alerts) < gift_before:
         msg = f"تم إيقاف جميع تنبيهات الأسعار وصيد الهدايا بنجاح. {SUCCESS_EMOJI}"
     else:
         msg = f"ليس لديك أي تنبيهات مفعلة. {WARN_EMOJI}"
@@ -1491,7 +1862,8 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_alerts = [a for a in alerts_db if a['user_id'] == user_id and a['active']]
     is_gift_sniper = user_id in gift_alert_users
-    if not user_alerts and not is_gift_sniper:
+    user_gift_alerts = [a for a in gift_price_alerts if a['user_id'] == user_id]
+    if not user_alerts and not is_gift_sniper and not user_gift_alerts:
         await send_custom_msg(update.message.chat_id, f"لا توجد لديك أي تنبيهات مفعلة حالياً. {WARN_EMOJI}", update.message.message_id)
         return
     msg = f"{WHALE_BELL} <b>تنبيهاتك الحالية:</b>\n\n"
@@ -1502,6 +1874,11 @@ async def my_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for idx, a in enumerate(user_alerts, 1):
             dir_txt = "صعود " + UP_EMOJI if a['direction'] == 'up' else "نزول " + DOWN_EMOJI
             msg += f"{idx}. <b>{a['curr_name']}</b> - السعر المطلوب: <code>{a['target']:g}</code> ({dir_txt})\n"
+    if user_gift_alerts:
+        msg += f"\n{GIFT_FLOOR_EMOJI} <b>الهدايا:</b>\n"
+        for idx, a in enumerate(user_gift_alerts, 1):
+            dir_txt = "صعود " + UP_EMOJI if a['direction'] == 'up' else "نزول " + DOWN_EMOJI
+            msg += f"{idx}. <b>{html.escape(a['gift'])}</b> - الفلور المطلوب: <code>{a['target']:g}</code> ({dir_txt})\n"
     await send_custom_msg(update.message.chat_id, msg, update.message.message_id)
 
 async def toggle_whale_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1669,8 +2046,91 @@ async def calc_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(update.message.chat_id, "⚠️ حدث خطأ أثناء الحساب، يرجى المحاولة لاحقاً.", update.message.message_id)
         return ConversationHandler.END
 
+# ===== حفظ البيانات بـ MongoDB =====
+# كل 10 ثواني ناخذ نسخة من بيانات البوت ونكتب بس الاشياء اللي تغيرت.
+# اذا MONGO_URI ما موجود او المونجو عطلان، البوت يكمل شغله بالذاكرة مثل قبل.
+MONGO_URI = os.environ.get("MONGO_URI", "")
+MONGO_DB_NAME = os.environ.get("MONGO_DB", "telegram_bot")
+mongo_state = {"col": None, "hashes": {}, "ok": False, "error": ""}
+
+def _set_global(name, value):
+    globals()[name] = value
+
+def _int_keys(d):
+    out = {}
+    for k, v in (d or {}).items():
+        try: out[int(k)] = v
+        except (TypeError, ValueError): continue
+    return out
+
+PERSIST_KEYS = {
+    "user_wallets": (lambda: {str(k): v for k, v in user_wallets.items()}, lambda d: user_wallets.update(_int_keys(d))),
+    "alerts_db": (lambda: alerts_db, lambda d: _set_global("alerts_db", [a for a in d if isinstance(a, dict)])),
+    "gift_alert_users": (lambda: {str(k): v for k, v in gift_alert_users.items()}, lambda d: gift_alert_users.update(_int_keys(d))),
+    "whale_alert_users": (lambda: {str(k): v for k, v in whale_alert_users.items()}, lambda d: whale_alert_users.update(_int_keys(d))),
+    "banned_users": (lambda: sorted(banned_users), lambda d: banned_users.update(int(x) for x in d)),
+    "user_mapping": (lambda: user_mapping, lambda d: user_mapping.update(d)),
+    "bot_users": (lambda: sorted(bot_users), lambda d: bot_users.update(int(x) for x in d)),
+    "wallet_watches": (lambda: wallet_watches, lambda d: _set_global("wallet_watches", [w for w in d if isinstance(w, dict)])),
+    "gift_price_alerts": (lambda: gift_price_alerts, lambda d: _set_global("gift_price_alerts", [a for a in d if isinstance(a, dict)])),
+    "master_manual": (lambda: master_manual, lambda d: master_manual.update(d)),
+    "price_history": (lambda: price_history, lambda d: merge_price_history(d)),
+}
+
+def _state_hash(data):
+    return hashlib.md5(json.dumps(data, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+
+async def load_persistent_state():
+    global last_known_iqd
+    if not MONGO_URI:
+        logging.warning("MONGO_URI not set: data is kept in memory only")
+        return
+    try:
+        from pymongo import AsyncMongoClient
+        client = AsyncMongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)
+        col = client[MONGO_DB_NAME]["state"]
+        loaded = 0
+        async for doc in col.find({}):
+            key = doc.get("_id")
+            if key in PERSIST_KEYS:
+                try:
+                    PERSIST_KEYS[key][1](doc.get("data"))
+                    loaded += 1
+                except Exception as e:
+                    logging.warning(f"mongo load {key} failed: {e}")
+        if master_manual.get("price"): last_known_iqd = master_manual["price"]
+        # نعتبر اللي انقرى هو الحالة الحالية حتى ما نعيد كتابته بلا داعي
+        mongo_state["hashes"] = {k: _state_hash(getter()) for k, (getter, _) in PERSIST_KEYS.items()}
+        mongo_state.update(col=col, ok=True, error="")
+        logging.info(f"MongoDB connected, loaded {loaded} keys")
+    except Exception as e:
+        mongo_state.update(ok=False, error=str(e)[:200])
+        logging.warning(f"MongoDB connection failed, using memory only: {e}")
+
+async def save_persistent_state():
+    col = mongo_state["col"]
+    if col is None: return
+    for key, (getter, _) in PERSIST_KEYS.items():
+        try:
+            data = json.loads(json.dumps(getter(), default=str))
+            h = _state_hash(data)
+            if mongo_state["hashes"].get(key) == h: continue
+            await col.replace_one({"_id": key}, {"_id": key, "data": data, "updated": int(time.time())}, upsert=True)
+            mongo_state["hashes"][key] = h
+            mongo_state.update(ok=True, error="")
+        except Exception as e:
+            mongo_state.update(ok=False, error=str(e)[:200])
+            logging.warning(f"mongo save {key} failed: {e}")
+
+async def persistence_loop():
+    while True:
+        await asyncio.sleep(10)
+        await save_persistent_state()
+
 async def post_init(app: Application):
     global mrkt_http
+    await load_persistent_state()
+    asyncio.create_task(persistence_loop())
     mrkt_http = AsyncSession(impersonate="chrome")
     asyncio.create_task(check_alerts_loop(app))
     asyncio.create_task(check_whales_loop(app)) 
@@ -1679,6 +2139,8 @@ async def post_init(app: Application):
     asyncio.create_task(mrkt_updater_loop())
     asyncio.create_task(price_history_loop())
     asyncio.create_task(live_chart_loop())
+    asyncio.create_task(gift_price_alerts_loop())
+    asyncio.create_task(wallet_watch_loop())
     BOT_USERNAME["name"] = app.bot.username or ""
 
 async def price_history_loop():
@@ -1878,6 +2340,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_new_user(update.effective_user, context)
     if await is_user_banned(update, context): return
     address = find_ton_address(update.message.text)
+    if re.match(r'^/?راقب(?:\s|$)', text):
+        await watch_wallet_cmd(update, context, address)
+        return
+    if re.match(r'^/?(?:الغاء|إلغاء) ?(?:ال)?مراقبة', text):
+        await unwatch_wallet_cmd(update, context, address)
+        return
+    if text in ["مراقباتي", "/مراقباتي"]:
+        await list_watches_cmd(update, context)
+        return
+    if text.lstrip('/') in ["هداياي", "حسابي", "قيمة هداياي", "قيمه هداياي"]:
+        await show_gifts_value(update, context, update.message.from_user)
+        return
+    if text.lstrip('/') in ["هداياه", "حسابه", "قيمة هداياه", "قيمه هداياه"]:
+        reply = update.message.reply_to_message
+        if reply and reply.from_user and not reply.from_user.is_bot:
+            await show_gifts_value(update, context, reply.from_user)
+        else:
+            await send_custom_msg(chat_id, f"رد على رسالة الشخص حتى أحسب قيمة هداياه {WARN_EMOJI}", reply_to_message_id=msg_id)
+        return
     if address:
         await handle_wallet_address(update, context, address)
         return
@@ -1899,6 +2380,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f'📱 <b>تحويل</b>: للتعرف على طريقة تحويل رصيد اسياسيل بسهولة {END_EMOJIS}\n'
         msg += f'{UP_EMOJI} <b>مؤشر</b>: صورة مؤشر صعود ونزول تتحدث كل 5 دقائق (جرام، بتكوين، او: مؤشر ماستر، مؤشر اسيا) {END_EMOJIS}\n'
         msg += f'{SEARCH_EMOJI} <b>ارسل اي عنوان محفظة</b>: يطلعلك رصيدها وآخر تحويل وعدد المقتنيات وأنشطتها {END_EMOJIS}\n'
+        msg += f'{WHALE_BELL} <b>راقب [العنوان]</b>: يبلغك بكل تحويل يدخل او يطلع من المحفظة (<b>مراقباتي</b> لعرضها) {END_EMOJIS}\n'
+        msg += f'{GIFT_FLOOR_EMOJI} <b>هداياي</b>: قيمة هداياك الظاهرة بالبروفايل حسب سعر مركت (او رد على شخص بـ <b>هداياه</b>) {END_EMOJIS}\n'
+        msg += f'{CLIPBOARD_EMOJI} <b>@{context.bot.username} 100 دولار</b>: الصرف من اي محادثة {END_EMOJIS}\n'
         await send_custom_msg(chat_id, msg, reply_to_message_id=msg_id)
         return
     if text == "تفعيل التنبيهات":
@@ -1964,18 +2448,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_custom_msg(chat_id, f"اضغط على الزر أدناه لتغيير محفظتك المربوطة {DOWN_EMOJI}:", reply_to_message_id=msg_id, extra_buttons=[[{"text": "تغيير محفضتي", "url": f"https://t.me/{context.bot.username}?start=change_wallet", "style": "success"}]])
         return
 
-    calc_match = re.match(r'^(?:صرف|سعر|حساب)?\s*(?:(\d+(?:\.\d+)?)\s*)?(الف|مليون|بليون|مليار|ترليون|كوادرليون)?\s*(جرام|غرام|كرام|قرام|gram|تون|ton|دولار|usdt|usd|\$|ماستر|master|بتكوين|بيتكوين|btc|bitcoin|اسيا|آسيا|asia|باث|bath|نجمه|نجمة|نجوم|star|stars|نج)(?:\s|$)', text)
-    if calc_match and (calc_match.group(1) or calc_match.group(2)):
-        amount_str = calc_match.group(1)
-        amount = float(amount_str) if amount_str else 1.0
-        if calc_match.group(2): amount *= {'الف': 1e3, 'مليون': 1e6, 'بليون': 1e9, 'مليار': 1e9, 'ترليون': 1e12, 'كوادرليون': 1e15}[calc_match.group(2)]
+    conversion = parse_conversion(text)
+    if conversion:
         await update_prices_if_needed()
-        await send_custom_msg(chat_id, generate_conversion_msg(amount, calc_match.group(3)), reply_to_message_id=msg_id)
+        await send_custom_msg(chat_id, generate_conversion_msg(*conversion), reply_to_message_id=msg_id)
         return
 
     if text in ["صرف", "سعر", "اسعار", "أسعار", "دولار", "بتكوين", "جرام", "غرام", "كرام", "قرام", "btc", "gram", "ماستر", "الماستر", "master", "نجوم", "نجمة", "نج", "اسيا", "آسيا", "asia", "باث", "bath", "صرف العملات", "اسعار العملات", "أسعار العملات", "صرف دولار", "صرف الدولار", "ص", "صر"]:
         await update_prices_if_needed()
         await send_custom_msg(chat_id, cached_msg if cached_msg else f"عذراً، حاول ثواني.. {WAIT_EMOJI}", reply_to_message_id=msg_id)
+
+# ===== الوضع المضمن (Inline): @البوت 100 دولار بأي محادثة =====
+def strip_custom_emoji(text):
+    return re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>', r'\1', text)
+
+def strip_html(text):
+    return html.unescape(re.sub(r'<[^>]+>', '', text))
+
+def inline_article(result_id, title, description, message):
+    return {"type": "article", "id": result_id, "title": title, "description": description[:200],
+            "input_message_content": {"message_text": message, "parse_mode": "HTML", "link_preview_options": {"is_disabled": True}},
+            "reply_markup": build_keyboard()}
+
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query
+    if not query: return
+    if query.from_user and query.from_user.id in banned_users:
+        await tg_api("answerInlineQuery", {"inline_query_id": query.id, "results": [], "cache_time": 30})
+        return
+    q = (query.query or "").strip()
+    await update_prices_if_needed()
+    results = []
+    conversion = parse_conversion(q) or (parse_conversion("1 " + q) if q else None)
+    if conversion:
+        amount, currency = conversion
+        msg = generate_conversion_msg(amount, currency)
+        lines = [strip_html(l) for l in msg.split("\n") if l.strip() and "╼" not in l]
+        results.append(inline_article("conv", strip_html(lines[0]).rstrip(':'), " | ".join(lines[1:4]), msg))
+    if cached_msg:
+        results.append(inline_article("bulletin", "نشرة الأسعار المباشرة", "الماستر، اسيا، الجرام، البتكوين وفلور الهدايا", cached_msg))
+    if not conversion:
+        results.append(inline_article("help", "اكتب المبلغ والعملة", "مثال: 100 دولار، 5 الف ماستر، 10 جرام",
+                                      f"اكتب بأي محادثة: <code>@{BOT_USERNAME['name'] or 'bot'} 100 دولار</code> حتى تطلع نتيجة الصرف {CLIPBOARD_EMOJI}"))
+    payload = {"inline_query_id": query.id, "results": results, "cache_time": 10}
+    data = await tg_api("answerInlineQuery", payload)
+    if not data.get("ok"):
+        # اذا تيليجرام رفض الايموجي المميز او ستايل الازرار، نرسل نسخة بسيطة
+        for r in results:
+            r["input_message_content"]["message_text"] = strip_custom_emoji(r["input_message_content"]["message_text"])
+            r["reply_markup"] = {"inline_keyboard": [[{"text": NEWS_BTN["text"], "url": NEWS_URL}]]}
+        await tg_api("answerInlineQuery", payload)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     print(f"⚠️ ظهر خطأ بالبوت: {context.error}")
@@ -2033,7 +2555,9 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(r'^/?نبهني$'), alert_start)],
         states={
-            ASK_ALERT_TYPE: [CallbackQueryHandler(alert_type_callback, pattern="^(alert_currency_start|alert_gifts_toggle|stop_gift_alerts)$")],
+            ASK_ALERT_TYPE: [CallbackQueryHandler(alert_type_callback, pattern="^(alert_currency_start|alert_gifts_toggle|alert_gift_named|stop_gift_alerts)$")],
+            ASK_GIFT_ALERT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), alert_gift_name)],
+            ASK_GIFT_ALERT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), alert_gift_price)],
             ASK_CURRENCY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), alert_currency_name)],
             ASK_CURRENCY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'^(الغاء|/cancel)$'), alert_currency_price)]
         },
@@ -2080,9 +2604,12 @@ def main():
     ))
     
     app.add_handler(CommandHandler("reset", reset_market_cmd))
+    app.add_handler(CommandHandler("status", bot_status_cmd))
+    app.add_handler(MessageHandler(filters.Regex(r'^/?حالة البوت$'), bot_status_cmd))
     app.add_handler(MessageHandler(filters.Regex(r'(?i)^/?(?:setmaster|تعيين الماستر|ماستر يدوي)(?:@\w+)?(?:\s|$)'), set_master_cmd))
     app.add_handler(CallbackQueryHandler(handle_reset_callback, pattern="^reset_"))
     app.add_handler(CallbackQueryHandler(chart_callback, pattern=r"^chart\|"))
+    app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(ChatMemberHandler(chat_member_updated, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.Regex(r'^/?ايقاف$'), stop_alerts))
     app.add_handler(MessageHandler(filters.Regex(r'^/?تنبيهاتي$'), my_alerts)) 
@@ -2090,7 +2617,7 @@ def main():
     app.add_error_handler(error_handler)
     
     print("--- البوت شغال الآن ومستعد للعمل ---")
-    app.run_polling(drop_pending_updates=True, bootstrap_retries=10, allowed_updates=["message", "callback_query", "my_chat_member"])
+    app.run_polling(drop_pending_updates=True, bootstrap_retries=10, allowed_updates=["message", "callback_query", "my_chat_member", "inline_query"])
 
 if __name__ == "__main__":
     main()

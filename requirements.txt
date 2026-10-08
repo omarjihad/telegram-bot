@@ -7,3 +7,4 @@ pyrogram
 TgCrypto
 curl_cffi
 matplotlib
+pymongo>=4.13
