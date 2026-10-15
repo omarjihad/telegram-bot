@@ -233,7 +233,7 @@ def tonnel_floor_for(name):
     prices = [d['price'] for d in active_listings.values() if d.get('price', 0) > 0 and clean_gift_name(d.get('name')) == target]
     return min(prices) if prices else 0
 
-async def mrkt_query(collections=None, models=None, count=20, ordering="Price", cursor=""):
+async def mrkt_query(collections=None, models=None, count=20, ordering="Price", cursor="", backdrops=None):
     # طلب واحد لمركت. يرجع قائمة الهدايا المعروضة او None اذا فشل
     global mrkt_token
     if not mrkt_http: return None
@@ -248,6 +248,7 @@ async def mrkt_query(collections=None, models=None, count=20, ordering="Price", 
             return None
     payload = get_mrkt_payload(collections or [], cursor, ordering)
     payload["modelNames"] = models or []
+    payload["backdropNames"] = backdrops or []
     payload["count"] = count
     try:
         r = await mrkt_http.post(MRKT_SALING_URL, headers=make_mrkt_headers(mrkt_token), json=payload, timeout=15)
@@ -266,18 +267,30 @@ async def mrkt_query(collections=None, models=None, count=20, ordering="Price", 
     except Exception: return None
     return [g for g in data.get("gifts", []) if isinstance(g, dict) and g.get("isOnSale") is not False]
 
-async def mrkt_cheapest(name, model=None, ttl=120):
-    # ارخص عروض مركت لهدية (ولموديل معين اذا انطيناه). يرجع [(سعر, id, هدية)] مرتبة
-    key = (clean_gift_name(name), (model or "").lower())
+def _mrkt_attr_matches(g, keys, wanted):
+    # اذا مركت رجع اسم الموديل/الخلفية بالهدية نتأكد انه نفسه، واذا ما رجعه نعتمد على فلتر مركت
+    if not wanted: return True
+    for k in keys:
+        v = g.get(k)
+        if isinstance(v, dict): v = v.get("name") or v.get("title")
+        if isinstance(v, str) and v: return v.strip().lower() == wanted.strip().lower()
+    return True
+
+async def mrkt_cheapest(name, model=None, ttl=120, backdrop=None):
+    # ارخص عروض مركت لهدية، ولموديل وخلفية معينة اذا انطيناهم. يرجع [(سعر, id, هدية)] مرتبة
+    key = (clean_gift_name(name), (model or "").lower(), (backdrop or "").lower())
     cached = mrkt_floor_cache.get(key)
     if cached and time.time() - cached[0] < ttl: return cached[1]
-    gifts = await mrkt_query(gift_name_variants(name), [model] if model else None, count=5)
+    gifts = await mrkt_query(gift_name_variants(name), [model] if model else None, count=5, backdrops=[backdrop] if backdrop else None)
     if gifts is None: return None
     target = clean_gift_name(name)
     items = []
     for g in gifts:
         price = extract_ton_price_mrkt(g)
-        if price and clean_gift_name(mrkt_gift_name(g)) == target: items.append((price, g.get("id"), g))
+        if not price or clean_gift_name(mrkt_gift_name(g)) != target: continue
+        if not _mrkt_attr_matches(g, ("modelName", "modelTitle", "model"), model): continue
+        if not _mrkt_attr_matches(g, ("backdropName", "backdropTitle", "backdrop"), backdrop): continue
+        items.append((price, g.get("id"), g))
     items.sort(key=lambda x: x[0])
     mrkt_floor_cache[key] = (time.time(), items)
     if len(mrkt_floor_cache) > 2000: mrkt_floor_cache.clear()
@@ -1199,7 +1212,7 @@ def _strip_tags(text):
     return html.unescape(re.sub(r'<[^>]+>', ' ', text or "")).strip()
 
 async def fetch_gift_attributes(slug, number):
-    # نقرا الموديل والخلفية والرمز من صفحة الهدية بتيليجرام
+    # نقرا الموديل والخلفية من صفحة الهدية بتيليجرام
     attrs = {}
     try:
         async with aiohttp.ClientSession() as session:
@@ -1208,7 +1221,7 @@ async def fetch_gift_attributes(slug, number):
                 page = await resp.text()
     except Exception:
         return attrs
-    for key in ("Model", "Backdrop", "Symbol"):
+    for key in ("Model", "Backdrop"):
         m = re.search(rf'<th[^>]*>\s*{key}\s*</th>\s*<td[^>]*>(.*?)</td>', page, re.S | re.I)
         if not m:
             desc = re.search(r'<meta\s+property="og:description"\s+content="([^"]*)"', page)
@@ -1231,13 +1244,20 @@ async def price_gift_link(slug, number):
     name = gift_slug_to_name(slug)
     attrs = await fetch_gift_attributes(slug, number)
     model = (attrs.get("model") or {}).get("name")
-    model_items = await mrkt_cheapest(name, model) if model else None
-    model_floor = model_items[0][0] if model_items else 0
-    floor, market, _ = await gift_floor_now(name)
+    backdrop = (attrs.get("backdrop") or {}).get("name")
     listed_price, listed_id = await mrkt_find_listing(name, number)
-    return {"slug": slug, "number": number, "name": name, "attrs": attrs, "model_floor": model_floor,
+    # الفلتر الاساسي: نفس الموديل ونفس الخلفية (بدون الهدية نفسها)
+    combo = [it for it in (await mrkt_cheapest(name, model, backdrop=backdrop) or []) if it[1] != listed_id] if model and backdrop else []
+    combo_floor, combo_id = (combo[0][0], combo[0][1]) if combo else (0, None)
+    model_floor = 0
+    if not combo_floor and model:
+        model_items = [it for it in (await mrkt_cheapest(name, model) or []) if it[1] != listed_id]
+        model_floor = model_items[0][0] if model_items else 0
+    floor, market, _ = await gift_floor_now(name)
+    return {"slug": slug, "number": number, "name": name, "attrs": attrs, "has_combo": bool(model and backdrop),
+            "combo_floor": combo_floor, "combo_id": combo_id, "model_floor": model_floor,
             "floor": floor, "market": market, "listed": listed_price, "listed_id": listed_id,
-            "estimate": model_floor or floor}
+            "estimate": combo_floor or model_floor or floor}
 
 async def handle_gift_links(update: Update, context: ContextTypes.DEFAULT_TYPE, links):
     chat_id, msg_id = update.message.chat_id, update.message.message_id
@@ -1249,7 +1269,7 @@ async def handle_gift_links(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if not isinstance(r, dict): continue
         title = f"<a href='https://t.me/nft/{html.escape(r['slug'])}-{r['number']}'>{html.escape(r['name'])} #{r['number']}</a>"
         lines = [f"{GIFT_FLOOR_EMOJI} <b>{title}</b>"]
-        labels = {"model": "🧬 الموديل", "backdrop": "🎨 الخلفية", "symbol": "🔣 الرمز"}
+        labels = {"model": "🧬 الموديل", "backdrop": "🎨 الخلفية"}
         for key, label in labels.items():
             a = r["attrs"].get(key)
             if a: lines.append(f"{label}: <b>{html.escape(a['name'])}</b>" + (f" ({html.escape(a['rarity'])})" if a["rarity"] else ""))
@@ -1257,7 +1277,13 @@ async def handle_gift_links(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             lines.append(f"🛒 معروضة للبيع بمركت: <b>{format_exact_price(r['listed'])}</b> {GRAM_EMOJI}")
             if r["listed_id"] and len(buttons) < 5:
                 buttons.append([{"text": f"شراء #{r['number']} من MRKT", "url": f"https://t.me/mrkt/app?startapp={r['listed_id']}", "style": "success", "icon_custom_emoji_id": MRKT_ICON_ID}])
-        if r["model_floor"]: lines.append(f"{UP_EMOJI} فلور نفس الموديل: <b>{format_exact_price(r['model_floor'])}</b> {GRAM_EMOJI}")
+        if r["combo_floor"]:
+            lines.append(f"{UP_EMOJI} فلور نفس الموديل والخلفية: <b>{format_exact_price(r['combo_floor'])}</b> {GRAM_EMOJI}")
+            if r["combo_id"] and len(buttons) < 5:
+                buttons.append([{"text": f"أرخص {r['name']} بنفس الموديل والخلفية", "url": f"https://t.me/mrkt/app?startapp={r['combo_id']}", "style": "primary", "icon_custom_emoji_id": MRKT_ICON_ID}])
+        elif r["has_combo"]:
+            lines.append(f"ماكو هدية معروضة بنفس الموديل والخلفية حالياً {WARN_EMOJI}")
+        if r["model_floor"]: lines.append(f"{UP_EMOJI} فلور نفس الموديل (خلفية مختلفة): <b>{format_exact_price(r['model_floor'])}</b> {GRAM_EMOJI}")
         if r["floor"]: lines.append(f"{GRAM_EMOJI} فلور الهدية: <b>{format_exact_price(r['floor'])}</b> ({r['market']})")
         if r["estimate"]:
             total += r["estimate"]
