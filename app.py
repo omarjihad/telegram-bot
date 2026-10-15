@@ -1240,24 +1240,29 @@ async def mrkt_find_listing(name, number):
             if price: return price, g.get("id")
     return None, None
 
+async def mrkt_floor_excluding(name, exclude_id, model=None, backdrop=None):
+    # ارخص عرض بمركت (بدون الهدية نفسها) ويا الـ id مالته
+    items = [it for it in (await mrkt_cheapest(name, model, backdrop=backdrop) or []) if it[1] != exclude_id]
+    return (items[0][0], items[0][1]) if items else (0, None)
+
 async def price_gift_link(slug, number):
+    # كل الاسعار من مركت بس
     name = gift_slug_to_name(slug)
     attrs = await fetch_gift_attributes(slug, number)
     model = (attrs.get("model") or {}).get("name")
     backdrop = (attrs.get("backdrop") or {}).get("name")
     listed_price, listed_id = await mrkt_find_listing(name, number)
-    # الفلتر الاساسي: نفس الموديل ونفس الخلفية (بدون الهدية نفسها)
-    combo = [it for it in (await mrkt_cheapest(name, model, backdrop=backdrop) or []) if it[1] != listed_id] if model and backdrop else []
-    combo_floor, combo_id = (combo[0][0], combo[0][1]) if combo else (0, None)
-    model_floor = 0
-    if not combo_floor and model:
-        model_items = [it for it in (await mrkt_cheapest(name, model) or []) if it[1] != listed_id]
-        model_floor = model_items[0][0] if model_items else 0
-    floor, market, _ = await gift_floor_now(name)
+    combo_floor, combo_id = await mrkt_floor_excluding(name, listed_id, model, backdrop) if model and backdrop else (0, None)
+    model_floor = backdrop_floor = 0
+    if not combo_floor:
+        # ماكو نفس الموديل والخلفية: نجيب فلور الموديل وفلور الخلفية كل وحد لحاله
+        if model: model_floor, _ = await mrkt_floor_excluding(name, listed_id, model=model)
+        if backdrop: backdrop_floor, _ = await mrkt_floor_excluding(name, listed_id, backdrop=backdrop)
+    floor, floor_id = await mrkt_floor_excluding(name, listed_id)
     return {"slug": slug, "number": number, "name": name, "attrs": attrs, "has_combo": bool(model and backdrop),
-            "combo_floor": combo_floor, "combo_id": combo_id, "model_floor": model_floor,
-            "floor": floor, "market": market, "listed": listed_price, "listed_id": listed_id,
-            "estimate": combo_floor or model_floor or floor}
+            "combo_floor": combo_floor, "combo_id": combo_id, "model_floor": model_floor, "backdrop_floor": backdrop_floor,
+            "floor": floor, "listed": listed_price, "listed_id": listed_id,
+            "estimate": combo_floor or model_floor or backdrop_floor or floor}
 
 async def handle_gift_links(update: Update, context: ContextTypes.DEFAULT_TYPE, links):
     chat_id, msg_id = update.message.chat_id, update.message.message_id
@@ -1281,10 +1286,11 @@ async def handle_gift_links(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             lines.append(f"{UP_EMOJI} فلور نفس الموديل والخلفية: <b>{format_exact_price(r['combo_floor'])}</b> {GRAM_EMOJI}")
             if r["combo_id"] and len(buttons) < 5:
                 buttons.append([{"text": f"أرخص {r['name']} بنفس الموديل والخلفية", "url": f"https://t.me/mrkt/app?startapp={r['combo_id']}", "style": "primary", "icon_custom_emoji_id": MRKT_ICON_ID}])
-        elif r["has_combo"]:
-            lines.append(f"ماكو هدية معروضة بنفس الموديل والخلفية حالياً {WARN_EMOJI}")
-        if r["model_floor"]: lines.append(f"{UP_EMOJI} فلور نفس الموديل (خلفية مختلفة): <b>{format_exact_price(r['model_floor'])}</b> {GRAM_EMOJI}")
-        if r["floor"]: lines.append(f"{GRAM_EMOJI} فلور الهدية: <b>{format_exact_price(r['floor'])}</b> ({r['market']})")
+        else:
+            if r["has_combo"]: lines.append(f"<i>ماكو هدية معروضة بنفس الموديل والخلفية حالياً</i>")
+            lines.append(f"🎨 فلور الخلفية: " + (f"<b>{format_exact_price(r['backdrop_floor'])}</b> {GRAM_EMOJI}" if r["backdrop_floor"] else "ماكو"))
+            lines.append(f"🧬 فلور الموديل: " + (f"<b>{format_exact_price(r['model_floor'])}</b> {GRAM_EMOJI}" if r["model_floor"] else "ماكو"))
+        lines.append(f"{GRAM_EMOJI} فلور الهدية: " + (f"<b>{format_exact_price(r['floor'])}</b> {GRAM_EMOJI}" if r["floor"] else "ماكو"))
         if r["estimate"]:
             total += r["estimate"]
             if ton_price:
