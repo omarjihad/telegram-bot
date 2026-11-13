@@ -22,7 +22,7 @@ PYRO_API_ID = int(os.environ.get("PYRO_API_ID", 12345678))
 PYRO_API_HASH = os.environ.get("PYRO_API_HASH", "PUT_YOUR_API_HASH_HERE")
 RAW_SESSION = os.environ.get("SESSION_NAME", "mrkt_session")
 
-ADMIN_IDS = [7126816492, 1955081272]
+ADMIN_IDS = [1955081272, 7126816492]
 DB_FILE = "tonnel_db.json"
 
 if len(RAW_SESSION) > 50:
